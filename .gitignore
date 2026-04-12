@@ -4,3 +4,4 @@ build/
 *.xcodeproj
 AppIcon.iconset/
 .claude/
+playlists/
