@@ -1,0 +1,82 @@
+{
+  "items" : [
+    {
+      "autoFollow" : true,
+      "filePath" : "\/Users\/danchao\/Documents\/HLLLYH\/live\/live aifs\/Flexit Tagger in click.aif",
+      "id" : "60BF3DC8-556F-4097-BEC6-62EDD1B4A468",
+      "leftVolume" : 1,
+      "masterVolume" : 1,
+      "mediaType" : "audio",
+      "name" : "Flexit Tagger in click",
+      "rightVolume" : 1,
+      "targetDisplayIndex" : 0
+    },
+    {
+      "autoFollow" : true,
+      "filePath" : "\/Users\/danchao\/Documents\/HLLLYH\/live\/live aifs\/Flexit Tagger in music.aif",
+      "id" : "1DFE1B67-5324-4870-AABD-32448B4537D6",
+      "leftVolume" : 1,
+      "masterVolume" : 1,
+      "mediaType" : "audio",
+      "name" : "Flexit Tagger in music",
+      "rightVolume" : 1,
+      "targetDisplayIndex" : 0
+    },
+    {
+      "autoFollow" : true,
+      "filePath" : "\/Users\/danchao\/Documents\/HLLLYH\/live\/live aifs\/Flexit Tagger out synth.aif",
+      "id" : "185ACD0D-307D-4B9D-B20D-73D9808D2E6B",
+      "leftVolume" : 1,
+      "masterVolume" : 1,
+      "mediaType" : "audio",
+      "name" : "Flexit Tagger out synth",
+      "rightVolume" : 1,
+      "targetDisplayIndex" : 0
+    },
+    {
+      "autoFollow" : false,
+      "filePath" : "\/Users\/danchao\/Documents\/HLLLYH\/live\/live videos\/final\/Flexit Tagger 43.mov",
+      "id" : "C43793CE-8DBA-49A6-AFBB-59DD9DE17763",
+      "leftVolume" : 1,
+      "masterVolume" : 1,
+      "mediaType" : "video",
+      "name" : "Flexit Tagger 43",
+      "rightVolume" : 1,
+      "targetDisplayIndex" : 0
+    },
+    {
+      "autoFollow" : true,
+      "filePath" : "\/Users\/danchao\/Documents\/HLLLYH\/live\/live aifs\/cbcs click.aif",
+      "id" : "34EE74DC-F925-4237-8220-0801E6C40CB2",
+      "leftVolume" : 1,
+      "masterVolume" : 1,
+      "mediaType" : "audio",
+      "name" : "cbcs click",
+      "rightVolume" : 1,
+      "targetDisplayIndex" : 0
+    },
+    {
+      "autoFollow" : true,
+      "filePath" : "\/Users\/danchao\/Documents\/HLLLYH\/live\/live aifs\/cbcs full.aif",
+      "id" : "F378C1F5-CAE2-46F7-A92D-CE40755C2A24",
+      "leftVolume" : 1,
+      "masterVolume" : 1,
+      "mediaType" : "audio",
+      "name" : "cbcs full",
+      "rightVolume" : 1,
+      "targetDisplayIndex" : 0
+    },
+    {
+      "autoFollow" : false,
+      "filePath" : "\/Users\/danchao\/Documents\/HLLLYH\/live\/live aifs\/cbcs synth.aif",
+      "id" : "D325C72A-517C-4AFF-B646-7CDDBBB61FAD",
+      "leftVolume" : 1,
+      "masterVolume" : 1,
+      "mediaType" : "audio",
+      "name" : "cbcs synth",
+      "rightVolume" : 1,
+      "targetDisplayIndex" : 0
+    }
+  ],
+  "version" : 1
+}
