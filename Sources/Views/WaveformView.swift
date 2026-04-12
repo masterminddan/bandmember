@@ -92,68 +92,79 @@ struct WaveformView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Waveform").font(.caption).foregroundColor(.secondary)
 
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.black.opacity(0.15))
+            HStack(spacing: 2) {
+                // Channel labels
+                VStack(spacing: 0) {
+                    Text("L")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.blue)
+                        .frame(maxHeight: .infinity)
+                    Text("R")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.orange)
+                        .frame(maxHeight: .infinity)
+                }
+                .frame(width: 12)
 
-                if isLoading {
-                    ProgressView()
-                        .scaleEffect(0.5)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let wf = waveform {
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            // Played region tint
-                            if duration > 0 {
-                                Rectangle()
-                                    .fill(Color.accentColor.opacity(0.08))
-                                    .frame(width: playheadX(in: geo.size.width))
-                            }
+                // Waveform
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.black.opacity(0.15))
 
-                            // Left channel (top half) — blue
-                            StereoWaveformShape(
-                                samples: wf.leftSamples,
-                                gain: masterVolume * leftVolume,
-                                flipped: false
-                            )
-                            .fill(Color.blue.opacity(0.6))
-
-                            // Right channel (bottom half) — orange
-                            StereoWaveformShape(
-                                samples: wf.rightSamples,
-                                gain: masterVolume * rightVolume,
-                                flipped: true
-                            )
-                            .fill(Color.orange.opacity(0.6))
-
-                            // Center line
-                            Rectangle()
-                                .fill(Color.secondary.opacity(0.3))
-                                .frame(height: 0.5)
-                                .position(x: geo.size.width / 2, y: geo.size.height / 2)
-
-                            // Playhead
-                            if duration > 0 {
-                                Rectangle()
-                                    .fill(Color.red)
-                                    .frame(width: 1.5)
-                                    .offset(x: playheadX(in: geo.size.width))
-                            }
-                        }
-                        .contentShape(Rectangle())
-                        .gesture(
-                            DragGesture(minimumDistance: 0)
-                                .onChanged { value in
-                                    guard duration > 0 else { return }
-                                    let fraction = max(0, min(1, value.location.x / geo.size.width))
-                                    startPosition = fraction * duration
+                    if isLoading {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else if let wf = waveform {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                if duration > 0 {
+                                    Rectangle()
+                                        .fill(Color.accentColor.opacity(0.08))
+                                        .frame(width: playheadX(in: geo.size.width))
                                 }
-                        )
+
+                                StereoWaveformShape(
+                                    samples: wf.leftSamples,
+                                    gain: masterVolume * leftVolume,
+                                    flipped: false
+                                )
+                                .fill(Color.blue.opacity(0.6))
+
+                                StereoWaveformShape(
+                                    samples: wf.rightSamples,
+                                    gain: masterVolume * rightVolume,
+                                    flipped: true
+                                )
+                                .fill(Color.orange.opacity(0.6))
+
+                                Rectangle()
+                                    .fill(Color.secondary.opacity(0.3))
+                                    .frame(height: 0.5)
+                                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+
+                                if duration > 0 {
+                                    Rectangle()
+                                        .fill(Color.red)
+                                        .frame(width: 1.5)
+                                        .offset(x: playheadX(in: geo.size.width))
+                                }
+                            }
+                            .contentShape(Rectangle())
+                            .gesture(
+                                DragGesture(minimumDistance: 0)
+                                    .onChanged { value in
+                                        guard duration > 0 else { return }
+                                        let fraction = max(0, min(1, value.location.x / geo.size.width))
+                                        startPosition = fraction * duration
+                                    }
+                            )
+                        }
+                    } else {
+                        Text("No waveform")
+                            .font(.caption2).foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                } else {
-                    Text("No waveform")
-                        .font(.caption2).foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .frame(height: 60)
@@ -162,14 +173,6 @@ struct WaveformView: View {
             if duration > 0 {
                 HStack {
                     Text(formatTime(startPosition)).foregroundColor(.red)
-                    Spacer()
-                    HStack(spacing: 8) {
-                        Circle().fill(Color.blue).frame(width: 6, height: 6)
-                        Text("L")
-                        Circle().fill(Color.orange).frame(width: 6, height: 6)
-                        Text("R")
-                    }
-                    .font(.caption2).foregroundColor(.secondary)
                     Spacer()
                     Text(formatTime(duration)).foregroundColor(.secondary)
                 }

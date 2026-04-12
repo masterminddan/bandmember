@@ -5,6 +5,7 @@ struct BandMemberApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = PlaylistStore()
     @StateObject private var playbackEngine = PlaybackEngine()
+    @AppStorage("darkMode") private var darkMode = true
 
     var body: some Scene {
         WindowGroup {
@@ -16,6 +17,7 @@ struct BandMemberApp: App {
                     appDelegate.store = store
                     store.restoreLastSession()
                 }
+                .preferredColorScheme(darkMode ? .dark : .light)
         }
         .defaultSize(width: 950, height: 600)
         .commands {
@@ -55,6 +57,11 @@ struct BandMemberApp: App {
                     importFromQLab()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
+            }
+
+            CommandMenu("View") {
+                Toggle("Dark Mode", isOn: $darkMode)
+                    .keyboardShortcut("k", modifiers: .command)
             }
 
             CommandMenu("Playback") {
