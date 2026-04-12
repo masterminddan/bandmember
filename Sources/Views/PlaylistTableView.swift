@@ -151,6 +151,7 @@ struct PlaylistRowView: View {
                 get: { item.autoFollow },
                 set: { newValue in
                     if let idx = store.items.firstIndex(where: { $0.id == item.id }) {
+                        store.pushUndo()
                         store.items[idx].autoFollow = newValue
                     }
                 }

@@ -48,6 +48,7 @@ struct ItemInspectorView: View {
                 ColorTagPicker(
                     value: multiSelectColorTag,
                     onChange: { newTag in
+                        store.pushUndo()
                         for id in store.selectedIDs {
                             if let idx = store.items.firstIndex(where: { $0.id == id }) {
                                 store.items[idx].colorTag = newTag
@@ -62,6 +63,7 @@ struct ItemInspectorView: View {
                 Toggle(isOn: Binding(
                     get: { multiSelectAutoFollow },
                     set: { newValue in
+                        store.pushUndo()
                         for id in store.selectedIDs {
                             if let idx = store.items.firstIndex(where: { $0.id == id }) {
                                 store.items[idx].autoFollow = newValue
@@ -129,7 +131,9 @@ struct ItemInspectorView: View {
                             guard index < store.items.count else { return }
                             store.items[index].name = newValue
                         }
-                    ))
+                    ), onEditingChanged: { began in
+                        if began { store.pushUndo() }
+                    })
                     .textFieldStyle(.roundedBorder)
                 }
 
@@ -142,6 +146,7 @@ struct ItemInspectorView: View {
                             let ext = url.pathExtension.lowercased()
                             let allowed: Set<String> = ["mp3", "aif", "aiff", "mp4", "mov"]
                             guard allowed.contains(ext) else { return }
+                            store.pushUndo()
                             store.items[index].filePath = url.path
                             store.items[index].name = url.deletingPathExtension().lastPathComponent
                             store.items[index].mediaType = MediaType.detect(from: url)
@@ -184,6 +189,7 @@ struct ItemInspectorView: View {
                                 get: { store.items[safe: index]?.targetDisplayIndex ?? 0 },
                                 set: { newValue in
                                     guard index < store.items.count else { return }
+                                    store.pushUndo()
                                     store.items[index].targetDisplayIndex = newValue
                                 }
                             )) {
@@ -206,6 +212,7 @@ struct ItemInspectorView: View {
                     value: store.items[safe: index]?.colorTag ?? .none,
                     onChange: { newTag in
                         guard index < store.items.count else { return }
+                        store.pushUndo()
                         store.items[index].colorTag = newTag
                     }
                 )
@@ -218,6 +225,7 @@ struct ItemInspectorView: View {
                         get: { store.items[safe: index]?.autoFollow ?? false },
                         set: { newValue in
                             guard index < store.items.count else { return }
+                            store.pushUndo()
                             store.items[index].autoFollow = newValue
                         }
                     )) {
@@ -241,7 +249,7 @@ struct ItemInspectorView: View {
                                 store.items[index].masterVolume = newValue
                                 playbackEngine.updateVolume(for: store.items[index])
                             }
-                        ))
+                        ), onEditStart: { store.pushUndo() })
                         VolumeSlider(label: "Left", value: Binding(
                             get: { store.items[safe: index]?.leftVolume ?? 1.0 },
                             set: { newValue in
@@ -249,7 +257,7 @@ struct ItemInspectorView: View {
                                 store.items[index].leftVolume = newValue
                                 playbackEngine.updateVolume(for: store.items[index])
                             }
-                        ))
+                        ), onEditStart: { store.pushUndo() })
                         VolumeSlider(label: "Right", value: Binding(
                             get: { store.items[safe: index]?.rightVolume ?? 1.0 },
                             set: { newValue in
@@ -257,7 +265,7 @@ struct ItemInspectorView: View {
                                 store.items[index].rightVolume = newValue
                                 playbackEngine.updateVolume(for: store.items[index])
                             }
-                        ))
+                        ), onEditStart: { store.pushUndo() })
                     }
                 }
 
@@ -337,13 +345,16 @@ struct VolumeSlider: View {
     let label: String
     @Binding var value: Float
     var maxValue: Float = 2.0
+    var onEditStart: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 8) {
             Text(label)
                 .frame(width: 46, alignment: .trailing)
                 .font(.callout)
-            Slider(value: $value, in: 0...maxValue)
+            Slider(value: $value, in: 0...maxValue) { editing in
+                if editing { onEditStart?() }
+            }
             Text(String(format: "%.0f%%", value * 100))
                 .frame(width: 44, alignment: .trailing)
                 .font(.system(.caption, design: .monospaced))

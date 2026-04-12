@@ -16,7 +16,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             // Cmd+key shortcuts
             if event.modifierFlags.contains(.command) {
-                switch event.charactersIgnoringModifiers {
+                switch event.charactersIgnoringModifiers?.lowercased() {
+                case "z":
+                    if event.modifierFlags.contains(.shift) {
+                        self.store?.redo()
+                    } else {
+                        self.store?.undo()
+                    }
+                    return nil
                 case "x":
                     self.store?.cutSelected()
                     return nil
