@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import AppKit
 
 // MARK: - Waveform Cache
 
@@ -79,6 +80,7 @@ enum WaveformGenerator {
 struct WaveformView: View {
     let filePath: String
     @Binding var startPosition: Double
+    @Binding var endPosition: Double?
     let masterVolume: Float
     let leftVolume: Float
     let rightVolume: Float
@@ -149,6 +151,13 @@ struct WaveformView: View {
                                         .frame(width: 1.5)
                                         .offset(x: playheadX(in: geo.size.width))
                                 }
+
+                                if duration > 0, let end = endPosition {
+                                    Rectangle()
+                                        .fill(Color.green)
+                                        .frame(width: 1.5)
+                                        .offset(x: positionX(end, in: geo.size.width))
+                                }
                             }
                             .contentShape(Rectangle())
                             .gesture(
@@ -156,7 +165,12 @@ struct WaveformView: View {
                                     .onChanged { value in
                                         guard duration > 0 else { return }
                                         let fraction = max(0, min(1, value.location.x / geo.size.width))
-                                        startPosition = fraction * duration
+                                        let time = fraction * duration
+                                        if NSEvent.modifierFlags.contains(.shift) {
+                                            endPosition = time
+                                        } else {
+                                            startPosition = time
+                                        }
                                     }
                             )
                         }
@@ -174,6 +188,18 @@ struct WaveformView: View {
                 HStack {
                     Text(formatTime(startPosition)).foregroundColor(.red)
                     Spacer()
+                    if let end = endPosition {
+                        HStack(spacing: 4) {
+                            Text("⟲ \(formatTime(end))").foregroundColor(.green)
+                            Button(action: { endPosition = nil }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Clear loop end point")
+                        }
+                        Spacer()
+                    }
                     Text(formatTime(duration)).foregroundColor(.secondary)
                 }
                 .font(.system(.caption2, design: .monospaced))
@@ -184,8 +210,12 @@ struct WaveformView: View {
     }
 
     private func playheadX(in width: CGFloat) -> CGFloat {
+        positionX(startPosition, in: width)
+    }
+
+    private func positionX(_ time: Double, in width: CGFloat) -> CGFloat {
         guard duration > 0 else { return 0 }
-        return CGFloat(startPosition / duration) * width
+        return CGFloat(max(0, min(time, duration)) / duration) * width
     }
 
     private func loadWaveform() {

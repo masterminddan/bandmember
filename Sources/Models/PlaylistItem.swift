@@ -54,7 +54,11 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
     /// Session-only playhead start position (seconds). Not saved to JSON.
     var startPosition: Double = 0.0
 
-    /// Exclude startPosition from serialization.
+    /// Session-only loop end position (seconds). When set and > startPosition,
+    /// audio playback loops back to startPosition on reaching this point.
+    var endPosition: Double? = nil
+
+    /// Exclude session-only positions from serialization.
     enum CodingKeys: String, CodingKey {
         case id, name, filePath, mediaType, targetDisplayIndex, autoFollow
         case masterVolume, leftVolume, rightVolume, colorTag
@@ -83,6 +87,25 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         self.mediaType = .divider
     }
 
+    // Equality / hash ignore session-only fields (startPosition, endPosition)
+    // so the "edited" indicator only fires on changes that would actually be saved.
+    static func == (lhs: PlaylistItem, rhs: PlaylistItem) -> Bool {
+        lhs.id == rhs.id
+            && lhs.name == rhs.name
+            && lhs.filePath == rhs.filePath
+            && lhs.mediaType == rhs.mediaType
+            && lhs.targetDisplayIndex == rhs.targetDisplayIndex
+            && lhs.autoFollow == rhs.autoFollow
+            && lhs.masterVolume == rhs.masterVolume
+            && lhs.leftVolume == rhs.leftVolume
+            && lhs.rightVolume == rhs.rightVolume
+            && lhs.colorTag == rhs.colorTag
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+
     // Custom decoder so older JSON files without colorTag still load
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -97,6 +120,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         rightVolume = try c.decodeIfPresent(Float.self, forKey: .rightVolume) ?? 1.0
         colorTag = try c.decodeIfPresent(ColorTag.self, forKey: .colorTag) ?? .none
         startPosition = 0.0  // session-only, always starts at 0
+        endPosition = nil    // session-only
     }
 }
 

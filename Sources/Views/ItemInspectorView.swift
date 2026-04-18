@@ -153,7 +153,7 @@ struct ItemInspectorView: View {
                         }
                     )
 
-                    // Waveform with start position, modulated by volume
+                    // Waveform with start/end positions, modulated by volume
                     WaveformView(
                         filePath: store.items[safe: index]?.filePath ?? "",
                         startPosition: Binding(
@@ -161,6 +161,13 @@ struct ItemInspectorView: View {
                             set: { newValue in
                                 guard index < store.items.count else { return }
                                 store.items[index].startPosition = newValue
+                            }
+                        ),
+                        endPosition: Binding(
+                            get: { store.items[safe: index]?.endPosition },
+                            set: { newValue in
+                                guard index < store.items.count else { return }
+                                store.items[index].endPosition = newValue
                             }
                         ),
                         masterVolume: store.items[safe: index]?.masterVolume ?? 1.0,

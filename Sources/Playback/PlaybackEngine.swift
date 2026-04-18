@@ -23,6 +23,7 @@ class PlaybackEngine: ObservableObject {
     private var videoPlayers: [UUID: AVPlayer] = [:]
     private var videoWindows: [UUID: NSWindow] = [:]
     private var videoEndObservers: [UUID: Any] = [:]
+    private var videoLoopObservers: [UUID: Any] = [:]  // boundary-time tokens
 
     weak var store: PlaylistStore?
 
@@ -55,7 +56,9 @@ class PlaybackEngine: ObservableObject {
                 idx = cur + 1
             }
         }
-        playSynchronized(items: items, startTime: item.startPosition)
+        playSynchronized(items: items,
+                         startTime: item.startPosition,
+                         endTime: item.endPosition)
     }
 
     func stop(itemID: UUID) {
@@ -166,8 +169,9 @@ class PlaybackEngine: ObservableObject {
     // MARK: - Synchronized playback
     // ══════════════════════════════════════════════════════════════════
 
-    private func playSynchronized(items: [PlaylistItem], startTime: Double = 0) {
-        debugLog("[ENGINE] playSynchronized: \(items.map { $0.name }) startTime=\(startTime)s")
+    private func playSynchronized(items: [PlaylistItem], startTime: Double = 0, endTime: Double? = nil) {
+        let endStr = endTime.map { "\($0)" } ?? "nil"
+        debugLog("[ENGINE] playSynchronized: \(items.map { $0.name }) startTime=\(startTime)s endTime=\(endStr)")
 
         var audioItems: [(item: PlaylistItem, cue: AudioCue)] = []
         var videoItems: [(item: PlaylistItem, player: AVPlayer)]  = []
@@ -184,11 +188,11 @@ class PlaybackEngine: ObservableObject {
             }
 
             if item.mediaType == .audio {
-                if let cue = prepareAudioCue(for: item, startTime: startTime) {
+                if let cue = prepareAudioCue(for: item, startTime: startTime, endTime: endTime) {
                     audioItems.append((item: item, cue: cue))
                 }
             } else {
-                if let player = prepareVideoPlayer(for: item, startTime: startTime) {
+                if let player = prepareVideoPlayer(for: item, startTime: startTime, endTime: endTime) {
                     videoItems.append((item: item, player: player))
                 }
             }
@@ -241,7 +245,7 @@ class PlaybackEngine: ObservableObject {
 
     /// Builds the audio graph:  PlayerNode → ChannelGainAU → MixerNode → MainMixer
     /// If startTime > 0, schedules from that offset. Skips if file is shorter than startTime.
-    private func prepareAudioCue(for item: PlaylistItem, startTime: Double = 0) -> AudioCue? {
+    private func prepareAudioCue(for item: PlaylistItem, startTime: Double = 0, endTime: Double? = nil) -> AudioCue? {
         let file: AVAudioFile
         do {
             file = try AVAudioFile(forReading: item.fileURL)
@@ -277,12 +281,23 @@ class PlaybackEngine: ObservableObject {
         audioEngine.connect(gainUnit,   to: mixer,    format: fmt)
         audioEngine.connect(mixer, to: audioEngine.mainMixerNode, format: nil)
 
-        // Schedule from start position
-        let remainingFrames = AVAudioFrameCount(file.length - startFrame)
-        playerNode.scheduleSegment(file, startingFrame: startFrame,
-                                   frameCount: remainingFrames, at: nil) { [weak self] in
-            DispatchQueue.main.async {
-                self?.stop(itemID: item.id)
+        // If a loop end point is set after the start, schedule the segment as a
+        // looping buffer (start → end → start → end …). Otherwise play to EOF once.
+        // The end point comes from the triggered item and applies to all chained items.
+        if let endPos = endTime,
+           endPos > startTime,
+           let loopBuffer = readBuffer(from: file,
+                                       startFrame: startFrame,
+                                       endTime: endPos,
+                                       sampleRate: sampleRate) {
+            playerNode.scheduleBuffer(loopBuffer, at: nil, options: .loops, completionHandler: nil)
+        } else {
+            let remainingFrames = AVAudioFrameCount(file.length - startFrame)
+            playerNode.scheduleSegment(file, startingFrame: startFrame,
+                                       frameCount: remainingFrames, at: nil) { [weak self] in
+                DispatchQueue.main.async {
+                    self?.stop(itemID: item.id)
+                }
             }
         }
 
@@ -290,6 +305,26 @@ class PlaybackEngine: ObservableObject {
                            gainAU: gainAU, mixerNode: mixer, file: file)
         audioCues[item.id] = cue
         return cue
+    }
+
+    /// Reads a [startFrame, endTime] segment from `file` into a PCM buffer for loop scheduling.
+    private func readBuffer(from file: AVAudioFile,
+                            startFrame: AVAudioFramePosition,
+                            endTime: Double,
+                            sampleRate: Double) -> AVAudioPCMBuffer? {
+        let endFrame = min(AVAudioFramePosition(endTime * sampleRate), file.length)
+        guard endFrame > startFrame else { return nil }
+        let frameCount = AVAudioFrameCount(endFrame - startFrame)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
+                                            frameCapacity: frameCount) else { return nil }
+        do {
+            file.framePosition = startFrame
+            try file.read(into: buffer, frameCount: frameCount)
+        } catch {
+            debugLog("[ENGINE] Loop buffer read failed: \(error)")
+            return nil
+        }
+        return buffer.frameLength > 0 ? buffer : nil
     }
 
     private func stopAudio(itemID: UUID) {
@@ -307,7 +342,7 @@ class PlaybackEngine: ObservableObject {
     // MARK: - Video player setup
     // ══════════════════════════════════════════════════════════════════
 
-    private func prepareVideoPlayer(for item: PlaylistItem, startTime: Double = 0) -> AVPlayer? {
+    private func prepareVideoPlayer(for item: PlaylistItem, startTime: Double = 0, endTime: Double? = nil) -> AVPlayer? {
         let player = AVPlayer(url: item.fileURL)
         player.automaticallyWaitsToMinimizeStalling = false
         player.volume = item.masterVolume
@@ -327,21 +362,37 @@ class PlaybackEngine: ObservableObject {
         videoPlayers[item.id] = player
         setupVideoWindow(for: item, player: player)
 
-        let observer = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: player.currentItem,
-            queue: .main
-        ) { [weak self] _ in
-            self?.stop(itemID: item.id)
+        // If looping, install a boundary observer that seeks back to startTime
+        // when the playhead reaches endTime. Otherwise stop on natural EOF.
+        if let endPos = endTime, endPos > startTime {
+            let endCM = CMTime(seconds: endPos, preferredTimescale: 600)
+            let token = player.addBoundaryTimeObserver(forTimes: [NSValue(time: endCM)],
+                                                       queue: .main) { [weak player] in
+                let backTo = CMTime(seconds: startTime, preferredTimescale: 600)
+                player?.seek(to: backTo, toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+            videoLoopObservers[item.id] = token
+        } else {
+            let observer = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: player.currentItem,
+                queue: .main
+            ) { [weak self] _ in
+                self?.stop(itemID: item.id)
+            }
+            videoEndObservers[item.id] = observer
         }
-        videoEndObservers[item.id] = observer
 
         return player
     }
 
     private func stopVideo(itemID: UUID) {
-        videoPlayers[itemID]?.pause()
-        videoPlayers[itemID]?.replaceCurrentItem(with: nil)
+        let player = videoPlayers[itemID]
+        if let token = videoLoopObservers.removeValue(forKey: itemID) {
+            player?.removeTimeObserver(token)
+        }
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
         videoPlayers.removeValue(forKey: itemID)
 
         if let window = videoWindows.removeValue(forKey: itemID) {
