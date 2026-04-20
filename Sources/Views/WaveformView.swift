@@ -79,6 +79,7 @@ enum WaveformGenerator {
 
 struct WaveformView: View {
     let filePath: String
+    let itemID: UUID
     @Binding var startPosition: Double
     @Binding var endPosition: Double?
     let masterVolume: Float
@@ -87,10 +88,19 @@ struct WaveformView: View {
     let beats: [Double]
     let snapMode: SnapMode
 
+    @EnvironmentObject var playbackEngine: PlaybackEngine
+    @EnvironmentObject var store: PlaylistStore
+
     @State private var waveform: WaveformData?
     @State private var isLoading = true
+    /// Latest playhead time for this item. Updated by `pollTimer` at 20 Hz
+    /// while the item is playing so the monospaced display under the
+    /// waveform reads smoothly.
+    @State private var currentTime: Double = 0
+    @State private var pollTimer: Timer?
 
     private var duration: Double { waveform?.duration ?? 0 }
+    private var isPlaying: Bool { store.playingItemIDs.contains(itemID) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -160,6 +170,16 @@ struct WaveformView: View {
                                         .frame(width: 1.5)
                                         .offset(x: positionX(end, in: geo.size.width))
                                 }
+
+                                // Live playhead — only visible while the item
+                                // is actually playing. Rendered last so it
+                                // sits on top of the start / end markers.
+                                if duration > 0 && isPlaying {
+                                    Rectangle()
+                                        .fill(Color.white.opacity(0.7))
+                                        .frame(width: 1)
+                                        .offset(x: positionX(currentTime, in: geo.size.width))
+                                }
                             }
                             .contentShape(Rectangle())
                             .gesture(
@@ -203,13 +223,58 @@ struct WaveformView: View {
                         }
                         Spacer()
                     }
+                    // Live playhead time — only shown while this item is
+                    // actually playing. Placed next to the total duration so
+                    // the reader can see "now / total" at a glance.
+                    if isPlaying {
+                        HStack(spacing: 3) {
+                            Image(systemName: "play.fill").font(.system(size: 8))
+                            Text(formatTime(currentTime))
+                        }
+                        .foregroundColor(.white)
+                    }
                     Text(formatTime(duration)).foregroundColor(.secondary)
                 }
                 .font(.system(.caption2, design: .monospaced))
             }
         }
-        .onAppear { loadWaveform() }
+        .onAppear {
+            loadWaveform()
+            syncPlayheadTimer()
+        }
         .onChange(of: filePath) { loadWaveform() }
+        .onChange(of: isPlaying) { _, _ in syncPlayheadTimer() }
+        .onChange(of: itemID) { _, _ in syncPlayheadTimer() }
+        .onDisappear { stopPlayheadTimer() }
+    }
+
+    /// Start a 20 Hz poll of `playbackEngine.currentTime(for:)` while the
+    /// item is playing; stop it otherwise. 20 Hz is smooth enough that the
+    /// hundredths digit in the monospaced display doesn't look janky, and
+    /// the light playhead line slides continuously instead of stepping.
+    private func syncPlayheadTimer() {
+        stopPlayheadTimer()
+        guard isPlaying else {
+            currentTime = 0
+            return
+        }
+        currentTime = playbackEngine.currentTime(for: itemID) ?? 0
+        // Capture the current `itemID` / `playbackEngine` in the closure so
+        // the timer isn't at risk of polling a stale id if the view is
+        // re-used for another item — the `.onChange(of: itemID)` above
+        // recreates us in that case, but belt-and-braces.
+        let capturedID = itemID
+        let capturedEngine = playbackEngine
+        let t = Timer.scheduledTimer(withTimeInterval: 1.0 / 20.0, repeats: true) { _ in
+            currentTime = capturedEngine.currentTime(for: capturedID) ?? 0
+        }
+        RunLoop.main.add(t, forMode: .common)
+        pollTimer = t
+    }
+
+    private func stopPlayheadTimer() {
+        pollTimer?.invalidate()
+        pollTimer = nil
     }
 
     private func playheadX(in width: CGFloat) -> CGFloat {

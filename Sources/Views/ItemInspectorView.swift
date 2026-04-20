@@ -253,6 +253,7 @@ struct ItemInspectorView: View {
 
                 WaveformView(
                     filePath: store.items[safe: index]?.filePath ?? "",
+                    itemID: id,
                     startPosition: Binding(
                         get: { store.items[safe: index]?.startPosition ?? 0 },
                         set: { newValue in

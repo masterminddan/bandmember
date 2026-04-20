@@ -145,13 +145,22 @@ final class PresenterState: ObservableObject {
     /// For each segment, compute the earliest time the presenter should light
     /// it up: pull forward by `leadTime` when possible, but never before the
     /// previous segment ends (and never before 0 for the first line).
+    ///
+    /// The floor is capped at the segment's own `start`. Without that cap,
+    /// a segment whose actual start precedes the previous segment's end
+    /// (overlapping segments — Whisper occasionally emits these, and they
+    /// can also arise from hand-edits) would be delayed until the previous
+    /// segment ends, sometimes by several seconds. Capping the floor means
+    /// overlapping segments trigger on their own start with no lead-in,
+    /// while back-to-back and gapped cases behave exactly as before.
     static func computeEffectiveStarts(_ segments: [LyricSegment],
                                        leadTime: Double) -> [Double] {
         var out: [Double] = []
         out.reserveCapacity(segments.count)
         for (i, seg) in segments.enumerated() {
             let earliest = seg.start - leadTime
-            let floor = (i == 0) ? 0.0 : segments[i - 1].end
+            let rawFloor = (i == 0) ? 0.0 : segments[i - 1].end
+            let floor = min(rawFloor, seg.start)
             out.append(max(floor, earliest))
         }
         return out
