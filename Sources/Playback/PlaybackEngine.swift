@@ -16,6 +16,7 @@ class PlaybackEngine: ObservableObject {
         let gainAU: ChannelGainAU      // raw reference for setting L/R gain
         let mixerNode: AVAudioMixerNode // per-cue master volume
         let file: AVAudioFile
+        let startPosition: Double      // file offset (seconds) where scheduled segment begins
     }
     private var audioCues: [UUID: AudioCue] = [:]
 
@@ -59,11 +60,24 @@ class PlaybackEngine: ObservableObject {
         playSynchronized(items: items,
                          startTime: item.startPosition,
                          endTime: item.endPosition)
+
+        // If the triggered item asks for lyrics, find a doc for the chain and
+        // open the presenter on its target display.
+        if item.showLyrics, let store = store,
+           let hit = LyricsStore.shared.lyricsForChain(triggeredItemID: item.id, store: store) {
+            LyricsPresenter.show(
+                item: item,
+                lyrics: hit.doc,
+                screenIndex: item.targetDisplayIndex,
+                engine: self
+            )
+        }
     }
 
     func stop(itemID: UUID) {
         stopAudio(itemID: itemID)
         stopVideo(itemID: itemID)
+        LyricsPresenter.hide(itemID: itemID)
         store?.playingItemIDs.remove(itemID)
     }
 
@@ -71,6 +85,7 @@ class PlaybackEngine: ObservableObject {
         for id in Array(audioCues.keys) + Array(videoPlayers.keys) {
             stop(itemID: id)
         }
+        LyricsPresenter.hideAll()
         audioEngine.stop()
     }
 
@@ -302,9 +317,30 @@ class PlaybackEngine: ObservableObject {
         }
 
         let cue = AudioCue(playerNode: playerNode, gainUnit: gainUnit,
-                           gainAU: gainAU, mixerNode: mixer, file: file)
+                           gainAU: gainAU, mixerNode: mixer, file: file,
+                           startPosition: startTime)
         audioCues[item.id] = cue
         return cue
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // MARK: - Current playback time (for lyrics sync etc.)
+    // ══════════════════════════════════════════════════════════════════
+
+    /// Returns the current playhead position (in seconds, absolute from file start)
+    /// for the given item, or nil if it isn't currently playing.
+    func currentTime(for itemID: UUID) -> Double? {
+        if let cue = audioCues[itemID] {
+            guard let nodeTime = cue.playerNode.lastRenderTime,
+                  let playerTime = cue.playerNode.playerTime(forNodeTime: nodeTime) else { return nil }
+            let elapsed = Double(playerTime.sampleTime) / playerTime.sampleRate
+            return cue.startPosition + max(0, elapsed)
+        }
+        if let player = videoPlayers[itemID] {
+            let t = player.currentTime().seconds
+            return t.isFinite ? t : nil
+        }
+        return nil
     }
 
     /// Reads a [startFrame, endTime] segment from `file` into a PCM buffer for loop scheduling.

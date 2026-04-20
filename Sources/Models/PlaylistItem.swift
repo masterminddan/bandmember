@@ -50,6 +50,10 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
     var leftVolume: Float = 1.0
     var rightVolume: Float = 1.0
     var colorTag: ColorTag = .none
+    /// When true, a fullscreen lyrics presenter opens on `targetDisplayIndex`
+    /// when this item is triggered, showing timed lyrics from any track in
+    /// the auto-follow chain.
+    var showLyrics: Bool = false
 
     /// Session-only playhead start position (seconds). Not saved to JSON.
     var startPosition: Double = 0.0
@@ -61,7 +65,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
     /// Exclude session-only positions from serialization.
     enum CodingKeys: String, CodingKey {
         case id, name, filePath, mediaType, targetDisplayIndex, autoFollow
-        case masterVolume, leftVolume, rightVolume, colorTag
+        case masterVolume, leftVolume, rightVolume, colorTag, showLyrics
     }
 
     var fileURL: URL {
@@ -100,6 +104,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
             && lhs.leftVolume == rhs.leftVolume
             && lhs.rightVolume == rhs.rightVolume
             && lhs.colorTag == rhs.colorTag
+            && lhs.showLyrics == rhs.showLyrics
     }
 
     func hash(into hasher: inout Hasher) {
@@ -119,6 +124,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         leftVolume = try c.decodeIfPresent(Float.self, forKey: .leftVolume) ?? 1.0
         rightVolume = try c.decodeIfPresent(Float.self, forKey: .rightVolume) ?? 1.0
         colorTag = try c.decodeIfPresent(ColorTag.self, forKey: .colorTag) ?? .none
+        showLyrics = try c.decodeIfPresent(Bool.self, forKey: .showLyrics) ?? false
         startPosition = 0.0  // session-only, always starts at 0
         endPosition = nil    // session-only
     }

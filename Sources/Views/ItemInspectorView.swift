@@ -162,122 +162,153 @@ struct ItemInspectorView: View {
     // MARK: - Single Item Inspector
 
     private func inspectorContent(for index: Int, id: UUID) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            headerBar(for: index, id: id)
+                .padding([.horizontal, .top])
+
+            if store.items[safe: index]?.isDivider == true {
+                dividerBody(for: index)
+            } else {
+                TabView {
+                    trackTabBody(for: index, id: id)
+                        .tabItem { Label("Track", systemImage: "waveform") }
+                    LyricsTabView(itemIndex: index, itemID: id)
+                        .tabItem { Label("Lyrics", systemImage: "text.bubble") }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func headerBar(for index: Int, id: UUID) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Inspector").font(.headline)
+                Spacer()
+                if store.playingItemIDs.contains(id) {
+                    HStack(spacing: 4) {
+                        Circle().fill(.green).frame(width: 8, height: 8)
+                        Text("Playing").font(.caption).foregroundColor(.green)
+                    }
+                }
+            }
+            // Name
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Name").font(.caption).foregroundColor(.secondary)
+                TextField("Name", text: Binding(
+                    get: { store.items[safe: index]?.name ?? "" },
+                    set: { newValue in
+                        guard index < store.items.count else { return }
+                        store.items[index].name = newValue
+                    }
+                ), onEditingChanged: { began in
+                    if began { store.pushUndo() }
+                })
+                .textFieldStyle(.roundedBorder)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func dividerBody(for index: Int) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                // Header
-                HStack {
-                    Text("Inspector")
-                        .font(.headline)
-                    Spacer()
-                    if store.playingItemIDs.contains(id) {
-                        HStack(spacing: 4) {
-                            Circle().fill(.green).frame(width: 8, height: 8)
-                            Text("Playing").font(.caption).foregroundColor(.green)
-                        }
-                    }
-                }
-
                 Divider()
+                ColorTagPicker(
+                    value: store.items[safe: index]?.colorTag ?? .none,
+                    onChange: { newTag in
+                        guard index < store.items.count else { return }
+                        store.pushUndo()
+                        store.items[index].colorTag = newTag
+                    }
+                )
+                Spacer()
+            }
+            .padding()
+        }
+    }
 
-                // Name
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Name")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextField("Name", text: Binding(
-                        get: { store.items[safe: index]?.name ?? "" },
+    private func trackTabBody(for index: Int, id: UUID) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                FileDropField(
+                    filePath: store.items[safe: index]?.filePath ?? "",
+                    onDrop: { url in
+                        guard index < store.items.count else { return }
+                        let ext = url.pathExtension.lowercased()
+                        let allowed: Set<String> = ["mp3", "aif", "aiff", "mp4", "mov"]
+                        guard allowed.contains(ext) else { return }
+                        store.pushUndo()
+                        store.items[index].filePath = url.path
+                        store.items[index].name = url.deletingPathExtension().lastPathComponent
+                        store.items[index].mediaType = MediaType.detect(from: url)
+                    }
+                )
+
+                WaveformView(
+                    filePath: store.items[safe: index]?.filePath ?? "",
+                    startPosition: Binding(
+                        get: { store.items[safe: index]?.startPosition ?? 0 },
                         set: { newValue in
                             guard index < store.items.count else { return }
-                            store.items[index].name = newValue
+                            store.items[index].startPosition = newValue
                         }
-                    ), onEditingChanged: { began in
-                        if began { store.pushUndo() }
-                    })
-                    .textFieldStyle(.roundedBorder)
+                    ),
+                    endPosition: Binding(
+                        get: { store.items[safe: index]?.endPosition },
+                        set: { newValue in
+                            guard index < store.items.count else { return }
+                            store.items[index].endPosition = newValue
+                        }
+                    ),
+                    masterVolume: store.items[safe: index]?.masterVolume ?? 1.0,
+                    leftVolume: store.items[safe: index]?.leftVolume ?? 1.0,
+                    rightVolume: store.items[safe: index]?.rightVolume ?? 1.0,
+                    beats: tempoBeats(for: id),
+                    snapMode: snapMode
+                )
+
+                tempoLabel(for: id)
+
+                HStack {
+                    Text("Type").font(.caption).foregroundColor(.secondary)
+                    Spacer()
+                    if let item = store.items[safe: index] {
+                        HStack(spacing: 4) {
+                            Image(systemName: item.mediaType.icon)
+                            Text(item.mediaType.rawValue.capitalized)
+                        }
+                        .font(.callout)
+                    }
                 }
 
-                // File path (only for media items)
-                if store.items[safe: index]?.isDivider == false {
-                    FileDropField(
-                        filePath: store.items[safe: index]?.filePath ?? "",
-                        onDrop: { url in
-                            guard index < store.items.count else { return }
-                            let ext = url.pathExtension.lowercased()
-                            let allowed: Set<String> = ["mp3", "aif", "aiff", "mp4", "mov"]
-                            guard allowed.contains(ext) else { return }
-                            store.pushUndo()
-                            store.items[index].filePath = url.path
-                            store.items[index].name = url.deletingPathExtension().lastPathComponent
-                            store.items[index].mediaType = MediaType.detect(from: url)
-                        }
-                    )
-
-                    // Waveform with start/end positions, modulated by volume
-                    WaveformView(
-                        filePath: store.items[safe: index]?.filePath ?? "",
-                        startPosition: Binding(
-                            get: { store.items[safe: index]?.startPosition ?? 0 },
+                // Target display (video only — audio uses this field via Lyrics tab)
+                if store.items[safe: index]?.mediaType == .video {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Target Display").font(.caption).foregroundColor(.secondary)
+                        Picker("Display", selection: Binding(
+                            get: { store.items[safe: index]?.targetDisplayIndex ?? 0 },
                             set: { newValue in
                                 guard index < store.items.count else { return }
-                                store.items[index].startPosition = newValue
+                                store.pushUndo()
+                                store.items[index].targetDisplayIndex = newValue
                             }
-                        ),
-                        endPosition: Binding(
-                            get: { store.items[safe: index]?.endPosition },
-                            set: { newValue in
-                                guard index < store.items.count else { return }
-                                store.items[index].endPosition = newValue
-                            }
-                        ),
-                        masterVolume: store.items[safe: index]?.masterVolume ?? 1.0,
-                        leftVolume: store.items[safe: index]?.leftVolume ?? 1.0,
-                        rightVolume: store.items[safe: index]?.rightVolume ?? 1.0,
-                        beats: tempoBeats(for: id),
-                        snapMode: snapMode
-                    )
-
-                    tempoLabel(for: id)
-
-                    // Type
-                    HStack {
-                        Text("Type").font(.caption).foregroundColor(.secondary)
-                        Spacer()
-                        if let item = store.items[safe: index] {
-                            HStack(spacing: 4) {
-                                Image(systemName: item.mediaType.icon)
-                                Text(item.mediaType.rawValue.capitalized)
-                            }
-                            .font(.callout)
+                        )) {
+                            Text("Main Display").tag(0)
+                            Text("2nd Display").tag(1)
                         }
-                    }
-
-                    // Target display (video only)
-                    if store.items[safe: index]?.mediaType == .video {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Target Display").font(.caption).foregroundColor(.secondary)
-                            Picker("Display", selection: Binding(
-                                get: { store.items[safe: index]?.targetDisplayIndex ?? 0 },
-                                set: { newValue in
-                                    guard index < store.items.count else { return }
-                                    store.pushUndo()
-                                    store.items[index].targetDisplayIndex = newValue
-                                }
-                            )) {
-                                Text("Main Display").tag(0)
-                                Text("2nd Display").tag(1)
-                            }
-                            .labelsHidden()
-                            if store.items[safe: index]?.targetDisplayIndex == 1 && NSScreen.screens.count < 2 {
-                                Text("2nd display not connected — video will not play")
-                                    .font(.caption2).foregroundColor(.orange)
-                            }
+                        .labelsHidden()
+                        if store.items[safe: index]?.targetDisplayIndex == 1 && NSScreen.screens.count < 2 {
+                            Text("2nd display not connected — video will not play")
+                                .font(.caption2).foregroundColor(.orange)
                         }
                     }
                 }
 
                 Divider()
 
-                // Color tag
                 ColorTagPicker(
                     value: store.items[safe: index]?.colorTag ?? .none,
                     onChange: { newTag in
@@ -287,56 +318,51 @@ struct ItemInspectorView: View {
                     }
                 )
 
-                // Auto-follow (not for dividers)
-                if store.items[safe: index]?.isDivider == false {
-                    Divider()
+                Divider()
 
-                    Toggle(isOn: Binding(
-                        get: { store.items[safe: index]?.autoFollow ?? false },
+                Toggle(isOn: Binding(
+                    get: { store.items[safe: index]?.autoFollow ?? false },
+                    set: { newValue in
+                        guard index < store.items.count else { return }
+                        store.pushUndo()
+                        store.items[index].autoFollow = newValue
+                    }
+                )) {
+                    VStack(alignment: .leading) {
+                        Text("Also play next")
+                        Text("Simultaneously triggers the next item when this one is played")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Volume").font(.headline)
+                    VolumeSlider(label: "Master", value: Binding(
+                        get: { store.items[safe: index]?.masterVolume ?? 1.0 },
                         set: { newValue in
                             guard index < store.items.count else { return }
-                            store.pushUndo()
-                            store.items[index].autoFollow = newValue
+                            store.items[index].masterVolume = newValue
+                            playbackEngine.updateVolume(for: store.items[index])
                         }
-                    )) {
-                        VStack(alignment: .leading) {
-                            Text("Also play next")
-                            Text("Simultaneously triggers the next item when this one is played")
-                                .font(.caption).foregroundColor(.secondary)
+                    ), onEditStart: { store.pushUndo() })
+                    VolumeSlider(label: "Left", value: Binding(
+                        get: { store.items[safe: index]?.leftVolume ?? 1.0 },
+                        set: { newValue in
+                            guard index < store.items.count else { return }
+                            store.items[index].leftVolume = newValue
+                            playbackEngine.updateVolume(for: store.items[index])
                         }
-                    }
-
-                    Divider()
-
-                    // Volume controls
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Volume").font(.headline)
-
-                        VolumeSlider(label: "Master", value: Binding(
-                            get: { store.items[safe: index]?.masterVolume ?? 1.0 },
-                            set: { newValue in
-                                guard index < store.items.count else { return }
-                                store.items[index].masterVolume = newValue
-                                playbackEngine.updateVolume(for: store.items[index])
-                            }
-                        ), onEditStart: { store.pushUndo() })
-                        VolumeSlider(label: "Left", value: Binding(
-                            get: { store.items[safe: index]?.leftVolume ?? 1.0 },
-                            set: { newValue in
-                                guard index < store.items.count else { return }
-                                store.items[index].leftVolume = newValue
-                                playbackEngine.updateVolume(for: store.items[index])
-                            }
-                        ), onEditStart: { store.pushUndo() })
-                        VolumeSlider(label: "Right", value: Binding(
-                            get: { store.items[safe: index]?.rightVolume ?? 1.0 },
-                            set: { newValue in
-                                guard index < store.items.count else { return }
-                                store.items[index].rightVolume = newValue
-                                playbackEngine.updateVolume(for: store.items[index])
-                            }
-                        ), onEditStart: { store.pushUndo() })
-                    }
+                    ), onEditStart: { store.pushUndo() })
+                    VolumeSlider(label: "Right", value: Binding(
+                        get: { store.items[safe: index]?.rightVolume ?? 1.0 },
+                        set: { newValue in
+                            guard index < store.items.count else { return }
+                            store.items[index].rightVolume = newValue
+                            playbackEngine.updateVolume(for: store.items[index])
+                        }
+                    ), onEditStart: { store.pushUndo() })
                 }
 
                 Spacer()

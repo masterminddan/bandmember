@@ -1,0 +1,117 @@
+import Foundation
+import Combine
+import WhisperKit
+
+struct WhisperModelInfo: Identifiable, Hashable {
+    /// WhisperKit variant identifier (what gets passed to WhisperKitConfig.model).
+    let id: String
+    let displayName: String
+    let approxSizeMB: Int
+    let qualityNote: String
+}
+
+/// Manages the on-disk catalog of WhisperKit CoreML models and wraps
+/// WhisperKit's download/delete operations with progress state for the UI.
+final class ModelManager: ObservableObject {
+    static let shared = ModelManager()
+
+    static let catalog: [WhisperModelInfo] = [
+        .init(id: "openai_whisper-tiny.en",
+              displayName: "Tiny (English)",
+              approxSizeMB: 40,
+              qualityNote: "Fastest, rough for singing"),
+        .init(id: "openai_whisper-base.en",
+              displayName: "Base (English)",
+              approxSizeMB: 75,
+              qualityNote: "Fast, fair on music"),
+        .init(id: "openai_whisper-small.en",
+              displayName: "Small (English)",
+              approxSizeMB: 250,
+              qualityNote: "Good balance — recommended"),
+        .init(id: "openai_whisper-medium.en",
+              displayName: "Medium (English)",
+              approxSizeMB: 800,
+              qualityNote: "High accuracy, slower"),
+        .init(id: "openai_whisper-large-v3-turbo",
+              displayName: "Large v3 Turbo",
+              approxSizeMB: 820,
+              qualityNote: "Best multilingual, fast"),
+    ]
+
+    @Published private(set) var installed: Set<String> = []
+    @Published private(set) var downloading: [String: Double] = [:]   // variant -> fraction
+    @Published private(set) var lastError: String? = nil
+
+    /// Root that WhisperKit is told to use; WhisperKit appends
+    /// "models/argmaxinc/whisperkit-coreml/<variant>" beneath it.
+    private let hubRoot: URL
+    /// Folder where installed model directories actually live.
+    private let installedDir: URL
+
+    private init() {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        self.hubRoot = docs.appendingPathComponent("huggingface", isDirectory: true)
+        self.installedDir = hubRoot
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent("argmaxinc", isDirectory: true)
+            .appendingPathComponent("whisperkit-coreml", isDirectory: true)
+        refreshInstalled()
+    }
+
+    /// Scans the download directory for installed model folders.
+    func refreshInstalled() {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(
+            at: installedDir,
+            includingPropertiesForKeys: [.isDirectoryKey]
+        ) else {
+            installed = []
+            return
+        }
+        var found: Set<String> = []
+        for url in contents where (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            found.insert(url.lastPathComponent)
+        }
+        installed = found
+    }
+
+    func isInstalled(_ variant: String) -> Bool { installed.contains(variant) }
+
+    func folder(for variant: String) -> URL {
+        installedDir.appendingPathComponent(variant, isDirectory: true)
+    }
+
+    @MainActor
+    func download(_ variant: String) async throws {
+        guard downloading[variant] == nil else { return }
+        downloading[variant] = 0.0
+        lastError = nil
+        defer { downloading[variant] = nil }
+
+        do {
+            _ = try await WhisperKit.download(
+                variant: variant,
+                downloadBase: hubRoot,
+                from: "argmaxinc/whisperkit-coreml",
+                progressCallback: { progress in
+                    Task { @MainActor in
+                        ModelManager.shared.downloading[variant] = progress.fractionCompleted
+                    }
+                }
+            )
+            refreshInstalled()
+            debugLog("Models: downloaded \(variant)")
+        } catch {
+            lastError = "Download failed: \(error.localizedDescription)"
+            debugLog("Models: download failed for \(variant): \(error)")
+            throw error
+        }
+    }
+
+    func delete(_ variant: String) {
+        let folder = folder(for: variant)
+        try? FileManager.default.removeItem(at: folder)
+        refreshInstalled()
+        debugLog("Models: deleted \(variant)")
+    }
+}
