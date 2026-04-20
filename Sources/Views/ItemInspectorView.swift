@@ -4,6 +4,12 @@ import AppKit
 struct ItemInspectorView: View {
     @EnvironmentObject var store: PlaylistStore
     @EnvironmentObject var playbackEngine: PlaybackEngine
+    @ObservedObject private var tempo = TempoCoordinator.shared
+    @AppStorage("snapMode") private var snapModeRaw: String = SnapMode.measure.rawValue
+
+    private var snapMode: SnapMode {
+        SnapMode(rawValue: snapModeRaw) ?? .measure
+    }
 
     var body: some View {
         if store.selectedIDs.count > 1 {
@@ -100,6 +106,59 @@ struct ItemInspectorView: View {
         }
     }
 
+    // MARK: - Tempo
+
+    private func tempoBeats(for itemID: UUID) -> [Double] {
+        tempo.tempoData(forItemID: itemID, store: store)?.beats ?? []
+    }
+
+    private var snapModeButton: some View {
+        Button(action: { snapModeRaw = snapMode.next().rawValue }) {
+            Text(snapMode.label)
+                .font(.caption2)
+                .foregroundColor(snapMode == .off ? .secondary : .accentColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill((snapMode == .off ? Color.secondary : Color.accentColor).opacity(0.12))
+                )
+        }
+        .buttonStyle(.plain)
+        .help("Click to cycle: measure → beat → off")
+    }
+
+    @ViewBuilder
+    private func tempoLabel(for itemID: UUID) -> some View {
+        let sourcePath = store.tempoSourcePath(forItemID: itemID)
+        HStack(spacing: 6) {
+            Image(systemName: "metronome")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            if let path = sourcePath, let data = tempo.cache[path] {
+                Text(String(format: "%.1f BPM", data.bpm))
+                    .font(.system(.callout, design: .monospaced).bold())
+                    .foregroundColor(.primary)
+                Spacer()
+                snapModeButton
+            } else if let path = sourcePath, tempo.analyzing.contains(path) {
+                ProgressView().scaleEffect(0.5).frame(width: 14, height: 14)
+                Text("Analyzing tempo…").font(.caption).foregroundColor(.secondary)
+                Spacer()
+            } else if sourcePath == nil {
+                Text("No tempo source in chain")
+                    .font(.caption).foregroundColor(.secondary)
+                Spacer()
+            } else {
+                Text("No beats detected")
+                    .font(.caption).foregroundColor(.secondary)
+                Spacer()
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
     // MARK: - Single Item Inspector
 
     private func inspectorContent(for index: Int, id: UUID) -> some View {
@@ -172,8 +231,12 @@ struct ItemInspectorView: View {
                         ),
                         masterVolume: store.items[safe: index]?.masterVolume ?? 1.0,
                         leftVolume: store.items[safe: index]?.leftVolume ?? 1.0,
-                        rightVolume: store.items[safe: index]?.rightVolume ?? 1.0
+                        rightVolume: store.items[safe: index]?.rightVolume ?? 1.0,
+                        beats: tempoBeats(for: id),
+                        snapMode: snapMode
                     )
+
+                    tempoLabel(for: id)
 
                     // Type
                     HStack {

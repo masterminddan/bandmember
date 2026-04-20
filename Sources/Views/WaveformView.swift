@@ -84,6 +84,8 @@ struct WaveformView: View {
     let masterVolume: Float
     let leftVolume: Float
     let rightVolume: Float
+    let beats: [Double]
+    let snapMode: SnapMode
 
     @State private var waveform: WaveformData?
     @State private var isLoading = true
@@ -165,7 +167,8 @@ struct WaveformView: View {
                                     .onChanged { value in
                                         guard duration > 0 else { return }
                                         let fraction = max(0, min(1, value.location.x / geo.size.width))
-                                        let time = fraction * duration
+                                        let rawTime = fraction * duration
+                                        let time = snapToNearestBeat(rawTime)
                                         if NSEvent.modifierFlags.contains(.shift) {
                                             endPosition = time
                                         } else {
@@ -211,6 +214,29 @@ struct WaveformView: View {
 
     private func playheadX(in width: CGFloat) -> CGFloat {
         positionX(startPosition, in: width)
+    }
+
+    private func snapToNearestBeat(_ time: Double) -> Double {
+        let anchors: [Double]
+        switch snapMode {
+        case .off:
+            return time
+        case .beat:
+            anchors = beats
+        case .measure:
+            // Assume 4/4: every 4th detected beat is a downbeat, starting at beats[0].
+            anchors = stride(from: 0, to: beats.count, by: 4).map { beats[$0] }
+        }
+        guard !anchors.isEmpty else { return time }
+        var lo = 0
+        var hi = anchors.count - 1
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if anchors[mid] < time { lo = mid + 1 } else { hi = mid }
+        }
+        let after = anchors[lo]
+        let before = lo > 0 ? anchors[lo - 1] : after
+        return (time - before) <= (after - time) ? before : after
     }
 
     private func positionX(_ time: Double, in width: CGFloat) -> CGFloat {

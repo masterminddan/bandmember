@@ -15,6 +15,7 @@ struct BandMemberApp: App {
                 .onAppear {
                     playbackEngine.store = store
                     appDelegate.store = store
+                    TempoCoordinator.shared.attach(to: store)
                     store.restoreLastSession()
                 }
                 .preferredColorScheme(darkMode ? .dark : .light)
@@ -59,7 +60,7 @@ struct BandMemberApp: App {
                 .keyboardShortcut("i", modifiers: [.command, .shift])
             }
 
-            CommandMenu("View") {
+            CommandGroup(after: .toolbar) {
                 Toggle("Dark Mode", isOn: $darkMode)
                     .keyboardShortcut("k", modifiers: .command)
             }
