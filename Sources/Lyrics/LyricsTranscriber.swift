@@ -38,10 +38,17 @@ final class LyricsTranscriber: ObservableObject {
         if case .transcribing = jobs[audioPath]?.state { return }
         if case .loadingModel = jobs[audioPath]?.state { return }
 
+        let shortPath = (audioPath as NSString).lastPathComponent
         jobs[audioPath] = JobStatus(state: .loadingModel)
+        debugLog("Lyrics: transcribe() called for \(shortPath) with variant=\(variant)")
+
         Task { @MainActor in
             do {
+                let loadStart = Date()
                 try await ensureModel(variant: variant)
+                let loadElapsed = Date().timeIntervalSince(loadStart)
+                debugLog(String(format: "Lyrics: model ready in %.1fs, starting transcription for %@", loadElapsed, shortPath))
+
                 guard let whisper = self.whisper else {
                     throw NSError(domain: "LyricsTranscriber", code: 1,
                                   userInfo: [NSLocalizedDescriptionKey: "Model not loaded"])
@@ -58,6 +65,7 @@ final class LyricsTranscriber: ObservableObject {
                     wordTimestamps: true
                 )
 
+                let transcribeStart = Date()
                 let results: [TranscriptionResult] = try await whisper.transcribe(
                     audioPath: audioPath,
                     decodeOptions: options,
@@ -72,6 +80,7 @@ final class LyricsTranscriber: ObservableObject {
                         return nil
                     }
                 )
+                let transcribeElapsed = Date().timeIntervalSince(transcribeStart)
 
                 let doc = Self.buildDocument(
                     audioPath: audioPath,
@@ -80,10 +89,11 @@ final class LyricsTranscriber: ObservableObject {
                 )
                 LyricsStore.shared.save(doc, for: audioPath)
                 self.jobs[audioPath] = JobStatus(state: .done)
-                debugLog("Lyrics: transcription complete for \((audioPath as NSString).lastPathComponent) — \(doc.segments.count) segments")
+                debugLog(String(format: "Lyrics: transcription complete for %@ in %.1fs — %d segments",
+                                shortPath, transcribeElapsed, doc.segments.count))
             } catch {
                 self.jobs[audioPath] = JobStatus(state: .failed(error.localizedDescription))
-                debugLog("Lyrics: transcription failed for \(audioPath): \(error)")
+                debugLog("Lyrics: transcription FAILED for \(shortPath): \(error)")
             }
         }
     }
@@ -92,14 +102,20 @@ final class LyricsTranscriber: ObservableObject {
     /// one if it's already loaded. Local folder is passed explicitly to avoid
     /// re-downloading anything that's already installed.
     private func ensureModel(variant: String) async throws {
-        if loadedVariant == variant, whisper != nil { return }
+        if loadedVariant == variant, whisper != nil {
+            debugLog("Lyrics: reusing already-loaded WhisperKit for \(variant)")
+            return
+        }
 
         let folder = ModelManager.shared.folder(for: variant)
+        debugLog("Lyrics: initializing WhisperKit for \(variant) at \(folder.path)")
+        debugLog("Lyrics: NOTE — first load of a model does CoreML specialization (2–8 min for turbo). Subsequent loads are <1s.")
+
         let config = WhisperKitConfig(
             model: variant,
             modelFolder: folder.path,
-            verbose: false,
-            logLevel: .none,
+            verbose: true,
+            logLevel: .info,
             prewarm: false,
             download: false
         )

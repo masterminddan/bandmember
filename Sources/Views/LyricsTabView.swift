@@ -37,9 +37,6 @@ struct LyricsTabView: View {
             }
             .padding()
         }
-        .sheet(isPresented: $showingModelSheet) {
-            ModelPickerSheet(preferredModel: $preferredModel, isPresented: $showingModelSheet)
-        }
     }
 
     // MARK: - Subviews
@@ -70,6 +67,9 @@ struct LyricsTabView: View {
             }
             Spacer()
             Button("Change / Download…") { showingModelSheet = true }
+                .popover(isPresented: $showingModelSheet, arrowEdge: .top) {
+                    ModelPickerPopover(preferredModel: $preferredModel, isPresented: $showingModelSheet)
+                }
         }
     }
 
@@ -145,24 +145,17 @@ struct LyricsTabView: View {
                             store.items[itemIndex].targetDisplayIndex = newValue
                         }
                     )) {
-                        ForEach(0..<max(NSScreen.screens.count, 1), id: \.self) { idx in
-                            Text(displayName(for: idx)).tag(idx)
-                        }
+                        Text("Main Display").tag(0)
+                        Text("2nd Display").tag(1)
                     }
                     .labelsHidden()
-                    .frame(maxWidth: 200)
+                }
+                if (item?.targetDisplayIndex ?? 0) == 1 && NSScreen.screens.count < 2 {
+                    Text("2nd display not connected — lyrics will not be shown")
+                        .font(.caption2).foregroundColor(.orange)
                 }
             }
         }
-    }
-
-    private func displayName(for index: Int) -> String {
-        let screens = NSScreen.screens
-        if index < screens.count {
-            let frame = screens[index].frame
-            return "Display \(index + 1) (\(Int(frame.width))×\(Int(frame.height)))"
-        }
-        return "Display \(index + 1) (not connected)"
     }
 
     @ViewBuilder
@@ -221,6 +214,7 @@ private struct LyricSegmentRow: View {
 
     @State private var editing = false
     @State private var draft: String = ""
+    @FocusState private var focused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -239,21 +233,45 @@ private struct LyricSegmentRow: View {
                     .help("Nudge later 100 ms")
             }
             if editing {
-                TextField("Lyric text", text: $draft, onCommit: {
-                    onChange(draft); editing = false
-                })
-                .textFieldStyle(.roundedBorder)
-                .onAppear { draft = segment.text }
+                TextField("", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focused)
+                    .onSubmit { commit() }
+                    .onExitCommand { revert() }
+                    .onChange(of: focused) { _, isFocused in
+                        // Losing focus (clicked outside, tab, etc.) reverts.
+                        if !isFocused && editing { revert() }
+                    }
             } else {
                 Text(segment.text)
                     .font(.callout)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
-                    .onTapGesture { draft = segment.text; editing = true }
+                    .onTapGesture(count: 2) { startEditing() }
             }
         }
         .padding(6)
         .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.06)))
+    }
+
+    private func startEditing() {
+        draft = segment.text
+        editing = true
+        // Request focus on the next runloop tick so the TextField exists.
+        DispatchQueue.main.async { focused = true }
+    }
+
+    private func commit() {
+        let newValue = draft
+        editing = false
+        focused = false
+        if newValue != segment.text { onChange(newValue) }
+    }
+
+    private func revert() {
+        draft = segment.text
+        editing = false
+        focused = false
     }
 
     private func timestamp(_ t: Double) -> String {
@@ -263,9 +281,9 @@ private struct LyricSegmentRow: View {
     }
 }
 
-// MARK: - Model picker sheet
+// MARK: - Model picker popover
 
-private struct ModelPickerSheet: View {
+private struct ModelPickerPopover: View {
     @Binding var preferredModel: String
     @Binding var isPresented: Bool
     @ObservedObject private var models = ModelManager.shared
@@ -275,7 +293,13 @@ private struct ModelPickerSheet: View {
             HStack {
                 Text("Whisper Models").font(.headline)
                 Spacer()
-                Button("Done") { isPresented = false }
+                Button(action: { isPresented = false }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Close")
             }
             Divider()
             Text("Models run locally. Downloads are one-time, cached in ~/Library/Application Support/BandMember/.")

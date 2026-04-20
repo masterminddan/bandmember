@@ -17,8 +17,14 @@ class PlaybackEngine: ObservableObject {
         let mixerNode: AVAudioMixerNode // per-cue master volume
         let file: AVAudioFile
         let startPosition: Double      // file offset (seconds) where scheduled segment begins
+        let loopEndPosition: Double?   // if set & > startPosition, audio loops in [start, end]
     }
     private var audioCues: [UUID: AudioCue] = [:]
+    /// Wall-clock moment each cue's audio is expected to start playing. Used
+    /// by `currentTime(for:)` to compute elapsed time for lyric sync,
+    /// independent of AVAudioEngine's sample-time accounting which is
+    /// unreliable across engine stop/restart cycles.
+    private var audioPlayStartDates: [UUID: Date] = [:]
 
     // ── Video (still uses AVPlayer per-cue) ──────────────────────────
     private var videoPlayers: [UUID: AVPlayer] = [:]
@@ -57,6 +63,9 @@ class PlaybackEngine: ObservableObject {
                 idx = cur + 1
             }
         }
+        let endStr = item.endPosition.map { String(format: "%.2f", $0) } ?? "nil"
+        debugLog(String(format: "[ENGINE] play(%@) startPosition=%.2fs endPosition=%@",
+                        item.name, item.startPosition, endStr))
         playSynchronized(items: items,
                          startTime: item.startPosition,
                          endTime: item.endPosition)
@@ -65,6 +74,7 @@ class PlaybackEngine: ObservableObject {
         // open the presenter on its target display.
         if item.showLyrics, let store = store,
            let hit = LyricsStore.shared.lyricsForChain(triggeredItemID: item.id, store: store) {
+            debugLog("Lyrics: presenting for \(item.name) (start=\(item.startPosition)s) from \((hit.item.filePath as NSString).lastPathComponent) — \(hit.doc.segments.count) segments, model=\(hit.doc.modelUsed), created=\(hit.doc.createdAt)")
             LyricsPresenter.show(
                 item: item,
                 lyrics: hit.doc,
@@ -228,20 +238,24 @@ class PlaybackEngine: ObservableObject {
         for (item, _) in videoItems { store?.playingItemIDs.insert(item.id) }
 
         // Start all audio nodes at the exact same sample time
+        let preRoll: TimeInterval = 0.1
         if !audioItems.isEmpty {
             let outputNode = audioEngine.outputNode
+            let wallStart = Date().addingTimeInterval(preRoll)
             if let nodeTime = outputNode.lastRenderTime, nodeTime.isSampleTimeValid {
-                let offsetSamples = AVAudioFramePosition(nodeTime.sampleRate * 0.1)
+                let offsetSamples = AVAudioFramePosition(nodeTime.sampleRate * preRoll)
                 let syncTime = AVAudioTime(sampleTime: nodeTime.sampleTime + offsetSamples,
                                            atRate: nodeTime.sampleRate)
                 debugLog("[ENGINE] Sync-starting \(audioItems.count) audio nodes")
-                for (_, cue) in audioItems {
+                for (item, cue) in audioItems {
                     cue.playerNode.play(at: syncTime)
+                    audioPlayStartDates[item.id] = wallStart
                 }
             } else {
                 debugLog("[ENGINE] No render time, starting immediately")
-                for (_, cue) in audioItems {
+                for (item, cue) in audioItems {
                     cue.playerNode.play()
+                    audioPlayStartDates[item.id] = Date()  // no pre-roll in this path
                 }
             }
         }
@@ -316,9 +330,14 @@ class PlaybackEngine: ObservableObject {
             }
         }
 
+        let loopEnd: Double? = {
+            guard let endPos = endTime, endPos > startTime else { return nil }
+            return endPos
+        }()
         let cue = AudioCue(playerNode: playerNode, gainUnit: gainUnit,
                            gainAU: gainAU, mixerNode: mixer, file: file,
-                           startPosition: startTime)
+                           startPosition: startTime,
+                           loopEndPosition: loopEnd)
         audioCues[item.id] = cue
         return cue
     }
@@ -331,10 +350,21 @@ class PlaybackEngine: ObservableObject {
     /// for the given item, or nil if it isn't currently playing.
     func currentTime(for itemID: UUID) -> Double? {
         if let cue = audioCues[itemID] {
-            guard let nodeTime = cue.playerNode.lastRenderTime,
-                  let playerTime = cue.playerNode.playerTime(forNodeTime: nodeTime) else { return nil }
-            let elapsed = Double(playerTime.sampleTime) / playerTime.sampleRate
-            return cue.startPosition + max(0, elapsed)
+            // Derive elapsed from wall-clock rather than playerNode's sample
+            // time. sampleTime is not reset cleanly across audioEngine
+            // stop/restart, which caused subsequent plays to report the wrong
+            // offset. Wall-clock is plenty accurate for a 30 Hz lyric timer.
+            guard let startDate = audioPlayStartDates[itemID] else {
+                return cue.startPosition
+            }
+            let elapsed = max(0, Date().timeIntervalSince(startDate))
+            if let loopEnd = cue.loopEndPosition {
+                let loopLen = loopEnd - cue.startPosition
+                guard loopLen > 0 else { return cue.startPosition + elapsed }
+                let inLoop = elapsed.truncatingRemainder(dividingBy: loopLen)
+                return cue.startPosition + inLoop
+            }
+            return cue.startPosition + elapsed
         }
         if let player = videoPlayers[itemID] {
             let t = player.currentTime().seconds
@@ -364,6 +394,7 @@ class PlaybackEngine: ObservableObject {
     }
 
     private func stopAudio(itemID: UUID) {
+        audioPlayStartDates.removeValue(forKey: itemID)
         guard let cue = audioCues.removeValue(forKey: itemID) else { return }
         cue.playerNode.stop()
         audioEngine.disconnectNodeOutput(cue.playerNode)

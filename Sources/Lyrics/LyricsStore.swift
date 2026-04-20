@@ -7,6 +7,9 @@ final class LyricsStore: ObservableObject {
     static let shared = LyricsStore()
 
     @Published private var cache: [String: LyricsDocument] = [:]
+    /// Sidecar file mtime captured when the entry was cached. Used to detect
+    /// external edits / retranscriptions and reload from disk.
+    private var cachedMTimes: [String: Date] = [:]
 
     private init() {}
 
@@ -14,17 +17,42 @@ final class LyricsStore: ObservableObject {
         return audioPath + ".lyrics.json"
     }
 
-    /// Loads from sidecar if not yet cached. Safe to call from any thread.
+    private func sidecarMTime(_ sidecar: String) -> Date? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: sidecar) else { return nil }
+        return attrs[.modificationDate] as? Date
+    }
+
+    /// Loads from sidecar if not yet cached OR if the sidecar on disk is
+    /// newer than the cached copy. Safe to call from any thread.
     func lyrics(for audioPath: String) -> LyricsDocument? {
-        if let cached = cache[audioPath] { return cached }
         let sidecar = sidecarPath(for: audioPath)
-        guard FileManager.default.fileExists(atPath: sidecar) else { return nil }
+        let diskMTime = sidecarMTime(sidecar)
+
+        // Fast path: cache hit with matching mtime.
+        if let cached = cache[audioPath],
+           let cachedAt = cachedMTimes[audioPath],
+           let diskMTime = diskMTime,
+           diskMTime <= cachedAt {
+            return cached
+        }
+        // If the sidecar doesn't exist, drop any stale cache entry.
+        guard diskMTime != nil else {
+            cache.removeValue(forKey: audioPath)
+            cachedMTimes.removeValue(forKey: audioPath)
+            return nil
+        }
+
         do {
             let data = try Data(contentsOf: URL(fileURLWithPath: sidecar))
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let doc = try decoder.decode(LyricsDocument.self, from: data)
-            DispatchQueue.main.async { self.cache[audioPath] = doc }
+            let mtime = diskMTime ?? Date()
+            DispatchQueue.main.async {
+                self.cache[audioPath] = doc
+                self.cachedMTimes[audioPath] = mtime
+            }
+            debugLog("Lyrics: loaded sidecar for \((audioPath as NSString).lastPathComponent) (\(doc.segments.count) segments, model=\(doc.modelUsed))")
             return doc
         } catch {
             debugLog("Lyrics: failed to load \(sidecar): \(error)")
@@ -33,7 +61,6 @@ final class LyricsStore: ObservableObject {
     }
 
     func save(_ doc: LyricsDocument, for audioPath: String) {
-        cache[audioPath] = doc
         let sidecar = sidecarPath(for: audioPath)
         do {
             let encoder = JSONEncoder()
@@ -41,6 +68,10 @@ final class LyricsStore: ObservableObject {
             encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(doc)
             try data.write(to: URL(fileURLWithPath: sidecar))
+            // Update cache after successful write so the mtime we record
+            // matches what's actually on disk.
+            cache[audioPath] = doc
+            cachedMTimes[audioPath] = sidecarMTime(sidecar) ?? Date()
             debugLog("Lyrics: saved sidecar for \((audioPath as NSString).lastPathComponent) (\(doc.segments.count) segments)")
         } catch {
             debugLog("Lyrics: failed to save \(sidecar): \(error)")
@@ -49,6 +80,7 @@ final class LyricsStore: ObservableObject {
 
     func delete(for audioPath: String) {
         cache.removeValue(forKey: audioPath)
+        cachedMTimes.removeValue(forKey: audioPath)
         let sidecar = sidecarPath(for: audioPath)
         try? FileManager.default.removeItem(atPath: sidecar)
     }

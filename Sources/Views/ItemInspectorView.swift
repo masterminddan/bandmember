@@ -6,9 +6,17 @@ struct ItemInspectorView: View {
     @EnvironmentObject var playbackEngine: PlaybackEngine
     @ObservedObject private var tempo = TempoCoordinator.shared
     @AppStorage("snapMode") private var snapModeRaw: String = SnapMode.measure.rawValue
+    @AppStorage("inspectorTab") private var inspectorTabRaw: String = "track"
 
     private var snapMode: SnapMode {
         SnapMode(rawValue: snapModeRaw) ?? .measure
+    }
+
+    private enum InspectorTab: String, CaseIterable { case track, lyrics
+        var label: String { rawValue.capitalized }
+    }
+    private var inspectorTab: InspectorTab {
+        get { InspectorTab(rawValue: inspectorTabRaw) ?? .track }
     }
 
     var body: some View {
@@ -162,60 +170,54 @@ struct ItemInspectorView: View {
     // MARK: - Single Item Inspector
 
     private func inspectorContent(for index: Int, id: UUID) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            headerBar(for: index, id: id)
-                .padding([.horizontal, .top])
-
+        Group {
             if store.items[safe: index]?.isDivider == true {
                 dividerBody(for: index)
             } else {
-                TabView {
-                    trackTabBody(for: index, id: id)
-                        .tabItem { Label("Track", systemImage: "waveform") }
-                    LyricsTabView(itemIndex: index, itemID: id)
-                        .tabItem { Label("Lyrics", systemImage: "text.bubble") }
+                VStack(spacing: 0) {
+                    Picker("", selection: Binding(
+                        get: { inspectorTab },
+                        set: { inspectorTabRaw = $0.rawValue }
+                    )) {
+                        ForEach(InspectorTab.allCases, id: \.self) { tab in
+                            Text(tab.label).tag(tab)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(.horizontal, 12)
+                    .padding(.top, 10)
+                    .padding(.bottom, 6)
+
+                    switch inspectorTab {
+                    case .track:
+                        trackTabBody(for: index, id: id)
+                    case .lyrics:
+                        LyricsTabView(itemIndex: index, itemID: id)
+                    }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
             }
         }
     }
 
-    @ViewBuilder
-    private func headerBar(for index: Int, id: UUID) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Inspector").font(.headline)
-                Spacer()
-                if store.playingItemIDs.contains(id) {
-                    HStack(spacing: 4) {
-                        Circle().fill(.green).frame(width: 8, height: 8)
-                        Text("Playing").font(.caption).foregroundColor(.green)
-                    }
-                }
+    private func nameField(for index: Int) -> some View {
+        TextField("Name", text: Binding(
+            get: { store.items[safe: index]?.name ?? "" },
+            set: { newValue in
+                guard index < store.items.count else { return }
+                store.items[index].name = newValue
             }
-            // Name
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Name").font(.caption).foregroundColor(.secondary)
-                TextField("Name", text: Binding(
-                    get: { store.items[safe: index]?.name ?? "" },
-                    set: { newValue in
-                        guard index < store.items.count else { return }
-                        store.items[index].name = newValue
-                    }
-                ), onEditingChanged: { began in
-                    if began { store.pushUndo() }
-                })
-                .textFieldStyle(.roundedBorder)
-            }
-        }
+        ), onEditingChanged: { began in
+            if began { store.pushUndo() }
+        })
+        .textFieldStyle(.roundedBorder)
     }
 
     @ViewBuilder
     private func dividerBody(for index: Int) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                Divider()
+                nameField(for: index)
                 ColorTagPicker(
                     value: store.items[safe: index]?.colorTag ?? .none,
                     onChange: { newTag in
@@ -233,6 +235,8 @@ struct ItemInspectorView: View {
     private func trackTabBody(for index: Int, id: UUID) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                nameField(for: index)
+
                 FileDropField(
                     filePath: store.items[safe: index]?.filePath ?? "",
                     onDrop: { url in

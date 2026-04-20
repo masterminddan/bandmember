@@ -32,10 +32,10 @@ final class ModelManager: ObservableObject {
               displayName: "Medium (English)",
               approxSizeMB: 800,
               qualityNote: "High accuracy, slower"),
-        .init(id: "openai_whisper-large-v3-turbo",
+        .init(id: "openai_whisper-large-v3-v20240930_turbo_632MB",
               displayName: "Large v3 Turbo",
-              approxSizeMB: 820,
-              qualityNote: "Best multilingual, fast"),
+              approxSizeMB: 632,
+              qualityNote: "Best multilingual, fast (quantized)"),
     ]
 
     @Published private(set) var installed: Set<String> = []
@@ -127,7 +127,9 @@ final class ModelManager: ObservableObject {
         lastError = nil
         defer { downloading[variant] = nil }
 
+        debugLog("Models: starting download for \(variant)")
         do {
+            let start = Date()
             _ = try await WhisperKit.download(
                 variant: variant,
                 downloadBase: hubRoot,
@@ -139,7 +141,8 @@ final class ModelManager: ObservableObject {
                 }
             )
             refreshInstalled()
-            debugLog("Models: downloaded \(variant)")
+            let elapsed = Date().timeIntervalSince(start)
+            debugLog(String(format: "Models: downloaded %@ in %.1fs", variant, elapsed))
         } catch {
             lastError = "Download failed: \(error.localizedDescription)"
             debugLog("Models: download failed for \(variant): \(error)")

@@ -35,6 +35,7 @@ final class LyricsPresenter {
         let screen = screens[screenIndex]
 
         let state = PresenterState()
+        state.setDocument(lyrics)
         let hosting = NSHostingView(rootView: LyricsDisplayView(state: state))
 
         let window = NSWindow(
@@ -53,13 +54,24 @@ final class LyricsPresenter {
         window.setFrame(screen.frame, display: true)
         window.orderFrontRegardless()
 
+        var lastLoggedBucket: Int = -2
+        let timerStart = Date()
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak engine] _ in
             guard let engine = engine else { return }
-            let t = engine.currentTime(for: item.id) ?? 0
+            let t = engine.currentTime(for: item.id) ?? item.startPosition
+            // Log once per second (bucketed on floor(t)) so the log shows the
+            // reported time progression without spamming 30 lines/sec.
+            let bucket = Int(t.rounded(.down))
+            if bucket != lastLoggedBucket {
+                lastLoggedBucket = bucket
+                let wall = Date().timeIntervalSince(timerStart)
+                debugLog(String(format: "LyricsTimer[%@]: t=%.2fs (wall=%.2fs)", item.name, t, wall))
+            }
             DispatchQueue.main.async {
-                state.update(time: t, doc: lyrics)
+                state.update(time: t)
             }
         }
+        debugLog("LyricsTimer[\(item.name)]: started, item.startPosition=\(item.startPosition)")
         RunLoop.main.add(timer, forMode: .common)
 
         sessions[item.id] = Session(itemID: item.id, doc: lyrics,
@@ -73,6 +85,7 @@ final class LyricsPresenter {
         session.timer.invalidate()
         session.window.orderOut(nil)
         session.window.close()
+        debugLog("LyricsTimer: stopped for item \(itemID)")
     }
 
     static func hideAll() {
@@ -80,88 +93,173 @@ final class LyricsPresenter {
     }
 }
 
-/// Observable state shared with the SwiftUI view.
+/// Observable state shared with the SwiftUI view. Owns the filtered
+/// (lyric-only) segment list and tracks which segment is the current "top"
+/// line in the two-line scrolling display.
 final class PresenterState: ObservableObject {
-    @Published var currentText: String = ""
-    @Published var nextText: String = ""
-    @Published var words: [LyricWord] = []
+    /// How far ahead of the actual playhead we treat a line as "current". The
+    /// two-line display already shows the upcoming line at the bottom, so this
+    /// is 0 by default (scroll on segment start, not early).
+    static let leadTime: Double = 0.0
+
+    @Published var visibleSegments: [LyricSegment] = []
+    /// Index into `visibleSegments` of the current (top) line, or -1 before
+    /// any lyric has come up.
+    @Published var topIndex: Int = -1
+    /// Word-level timings for the current top line (used for per-word highlight).
+    @Published var currentWords: [LyricWord] = []
     @Published var currentTime: Double = 0
 
-    func update(time: Double, doc: LyricsDocument) {
-        self.currentTime = time
-        if let idx = doc.currentOrUpcomingSegmentIndex(at: time) {
-            let seg = doc.segments[idx]
-            // If we're before the segment starts, show it as upcoming only
-            if time < seg.start {
-                currentText = ""
-                nextText = seg.text
-                words = []
-            } else {
-                currentText = seg.text
-                nextText = idx + 1 < doc.segments.count ? doc.segments[idx + 1].text : ""
-                words = seg.words
+    func setDocument(_ doc: LyricsDocument) {
+        // Clean each segment's text and words of music symbols and drop any
+        // segment that's left empty (pure-music passages).
+        visibleSegments = doc.segments.compactMap { seg in
+            let cleanedText = Self.stripNonLyricMarks(seg.text)
+            guard Self.isLyric(cleanedText) else { return nil }
+            let cleanedWords: [LyricWord] = seg.words.compactMap { w in
+                let ct = Self.stripNonLyricMarks(w.text)
+                guard !ct.isEmpty else { return nil }
+                return LyricWord(text: ct, start: w.start, end: w.end)
             }
-        } else {
-            currentText = ""
-            nextText = ""
-            words = []
+            return LyricSegment(id: seg.id, text: cleanedText,
+                                start: seg.start, end: seg.end,
+                                words: cleanedWords)
         }
+        topIndex = -1
+        currentWords = []
+    }
+
+    func update(time: Double) {
+        self.currentTime = time
+        let adjusted = time + Self.leadTime
+        // Largest i such that visibleSegments[i].start <= adjusted.
+        var newTop = -1
+        for (i, seg) in visibleSegments.enumerated() {
+            if seg.start <= adjusted { newTop = i } else { break }
+        }
+        if newTop != topIndex {
+            topIndex = newTop
+            if newTop >= 0 {
+                currentWords = visibleSegments[newTop].words.filter { Self.isLyric($0.text) }
+            } else {
+                currentWords = []
+            }
+        }
+    }
+
+    /// Whisper emits tokens like "[Music]", "[Applause]", "(instrumental)",
+    /// etc. for non-speech passages. Skip those entirely.
+    static func isLyric(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return false }
+        let first = trimmed.first!
+        let last = trimmed.last!
+        if (first == "[" && last == "]") || (first == "(" && last == ")") {
+            return false
+        }
+        return true
+    }
+
+    /// Whisper also emits unicode music symbols (♪ ♫ ♩ ♬ etc.) for purely
+    /// musical passages — strip those so the presenter doesn't show them.
+    static func stripNonLyricMarks(_ text: String) -> String {
+        let symbols: Set<Character> = ["♪", "♫", "♩", "♬", "♭", "♮", "♯", "𝄞"]
+        let filtered = String(text.unicodeScalars.filter { scalar in
+            if let c = Character(String(scalar)) as Character?, symbols.contains(c) { return false }
+            return true
+        })
+        return filtered.trimmingCharacters(in: .whitespaces)
     }
 }
 
 private struct LyricsDisplayView: View {
     @ObservedObject var state: PresenterState
 
+    private let lineFontSize: CGFloat = 72
+    private let rowHeight: CGFloat = 140
+    private let lineSpacing: CGFloat = 30
+
+    private var lineFont: Font {
+        .system(size: lineFontSize, weight: .bold, design: .rounded)
+    }
+
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 24) {
-                Spacer()
-                if state.words.isEmpty {
-                    Text(state.currentText)
-                        .font(.system(size: 96, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity)
-                } else {
-                    wordHighlightedLine
+        GeometryReader { geo in
+            ZStack(alignment: .top) {
+                Color.black
+                // All lines live in one VStack and the whole stack slides up
+                // as a single rigid body on line transitions — no per-word
+                // jitter, because only the container's offset is animated.
+                VStack(spacing: lineSpacing) {
+                    ForEach(Array(state.visibleSegments.enumerated()), id: \.element.id) { i, seg in
+                        lineView(seg, at: i)
+                            .frame(width: max(200, geo.size.width - 120),
+                                   height: rowHeight)
+                            .opacity(opacity(for: i))
+                    }
                 }
-                Text(state.nextText)
-                    .font(.system(size: 48, weight: .regular, design: .rounded))
-                    .foregroundColor(.white.opacity(0.45))
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity)
-                Spacer()
+                .frame(width: geo.size.width, alignment: .top)
+                .offset(y: stackOffset(in: geo))
             }
-            .padding(.horizontal, 80)
+            .clipped()
+        }
+        .ignoresSafeArea()
+        .animation(.easeInOut(duration: 0.45), value: state.topIndex)
+    }
+
+    /// Vertical offset for the full VStack of lines such that
+    /// `visibleSegments[topIndex]` (or index 0 before the first transition)
+    /// sits at roughly 38 % of the screen height.
+    private func stackOffset(in geo: GeometryProxy) -> CGFloat {
+        let anchor = geo.size.height * 0.38
+        let ref = max(0, state.topIndex)
+        return anchor - CGFloat(ref) * (rowHeight + lineSpacing)
+    }
+
+    /// Always returns the same view structure (a word-level flow layout), so
+    /// SwiftUI preserves identity across transitions — only per-word colors
+    /// change based on whether this line is the current one and whether each
+    /// word has been sung yet. Color changes are NOT individually animated —
+    /// the parent's 0.45s animation governs line transitions as a rigid body.
+    private func lineView(_ seg: LyricSegment, at i: Int) -> some View {
+        let words = seg.words.isEmpty
+            ? [LyricWord(text: seg.text, start: seg.start, end: seg.end)]
+            : seg.words
+        let isCurrent = (i == state.topIndex)
+        return WrappingHStack(words, spacing: 18, lineSpacing: 12) { word in
+            let isPast = isCurrent && state.currentTime >= word.end
+            let isNow  = isCurrent && state.currentTime >= word.start && state.currentTime < word.end
+            let color: Color = {
+                if isNow { return .yellow }
+                if isPast { return .white }
+                return isCurrent ? .white.opacity(0.7) : .white.opacity(0.85)
+            }()
+            Text(word.text)
+                .font(lineFont)
+                .foregroundColor(color)
         }
     }
 
-    /// Lays out words with the currently-sung one highlighted in accent color
-    /// and already-passed words dimmer.
-    private var wordHighlightedLine: some View {
-        WrappingHStack(state.words, spacing: 18, lineSpacing: 18) { word in
-            let isPast = state.currentTime >= word.end
-            let isNow = state.currentTime >= word.start && state.currentTime < word.end
-            Text(word.text)
-                .font(.system(size: 96, weight: .bold, design: .rounded))
-                .foregroundColor(isNow ? .yellow : (isPast ? .white.opacity(0.85) : .white.opacity(0.35)))
-                .animation(.easeOut(duration: 0.08), value: isNow)
-        }
+    /// Only the top line and its successor are fully visible; everything
+    /// else is off-screen conceptually (opacity 0).
+    private func opacity(for i: Int) -> Double {
+        guard state.topIndex >= 0 else { return 0 }
+        if i == state.topIndex || i == state.topIndex + 1 { return 1 }
+        return 0
     }
 }
 
-/// Tiny flow layout so words wrap naturally on large screens.
-private struct WrappingHStack<Data: RandomAccessCollection, Content: View>: View
-where Data.Element: Hashable {
-    let data: Data
+/// Tiny flow layout that wraps words naturally on large screens. Uses array
+/// index as identity so repeated words ("la la la") each get their own slot.
+private struct WrappingHStack<Content: View>: View {
+    let words: [LyricWord]
     let spacing: CGFloat
     let lineSpacing: CGFloat
-    let content: (Data.Element) -> Content
+    let content: (LyricWord) -> Content
 
-    init(_ data: Data, spacing: CGFloat = 12, lineSpacing: CGFloat = 12,
-         @ViewBuilder content: @escaping (Data.Element) -> Content) {
-        self.data = data
+    init(_ words: [LyricWord], spacing: CGFloat = 12, lineSpacing: CGFloat = 12,
+         @ViewBuilder content: @escaping (LyricWord) -> Content) {
+        self.words = words
         self.spacing = spacing
         self.lineSpacing = lineSpacing
         self.content = content
@@ -169,8 +267,8 @@ where Data.Element: Hashable {
 
     var body: some View {
         FlowLayout(spacing: spacing, lineSpacing: lineSpacing) {
-            ForEach(Array(data), id: \.self) { element in
-                content(element)
+            ForEach(words.indices, id: \.self) { i in
+                content(words[i])
             }
         }
     }
