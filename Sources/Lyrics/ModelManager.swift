@@ -49,13 +49,52 @@ final class ModelManager: ObservableObject {
     private let installedDir: URL
 
     private init() {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        self.hubRoot = docs.appendingPathComponent("huggingface", isDirectory: true)
+        // Store under ~/Library/Application Support/BandMember/ — the standard
+        // macOS location for app data. WhisperKit tacks on
+        // "models/argmaxinc/whisperkit-coreml/<variant>" beneath `hubRoot`.
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                  in: .userDomainMask).first!
+        self.hubRoot = appSupport
+            .appendingPathComponent("BandMember", isDirectory: true)
+            .appendingPathComponent("huggingface", isDirectory: true)
         self.installedDir = hubRoot
             .appendingPathComponent("models", isDirectory: true)
             .appendingPathComponent("argmaxinc", isDirectory: true)
             .appendingPathComponent("whisperkit-coreml", isDirectory: true)
+        try? FileManager.default.createDirectory(at: installedDir,
+                                                 withIntermediateDirectories: true)
+        migrateFromLegacyLocation()
         refreshInstalled()
+    }
+
+    /// If a user downloaded models under ~/Documents/huggingface (pre-fix),
+    /// move the variants into the new Application Support location once.
+    private func migrateFromLegacyLocation() {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let legacyInstalled = docs
+            .appendingPathComponent("huggingface", isDirectory: true)
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent("argmaxinc", isDirectory: true)
+            .appendingPathComponent("whisperkit-coreml", isDirectory: true)
+
+        let fm = FileManager.default
+        guard let legacyContents = try? fm.contentsOfDirectory(
+            at: legacyInstalled,
+            includingPropertiesForKeys: [.isDirectoryKey]
+        ), !legacyContents.isEmpty else { return }
+
+        for url in legacyContents {
+            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            guard isDir else { continue }
+            let dest = installedDir.appendingPathComponent(url.lastPathComponent, isDirectory: true)
+            if fm.fileExists(atPath: dest.path) { continue }
+            do {
+                try fm.moveItem(at: url, to: dest)
+                debugLog("Models: migrated \(url.lastPathComponent) from Documents/huggingface")
+            } catch {
+                debugLog("Models: migration failed for \(url.lastPathComponent): \(error)")
+            }
+        }
     }
 
     /// Scans the download directory for installed model folders.

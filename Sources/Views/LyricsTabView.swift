@@ -278,7 +278,7 @@ private struct ModelPickerSheet: View {
                 Button("Done") { isPresented = false }
             }
             Divider()
-            Text("Models run locally. Downloads are one-time, cached in ~/Documents/huggingface.")
+            Text("Models run locally. Downloads are one-time, cached in ~/Library/Application Support/BandMember/.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             ForEach(ModelManager.catalog) { info in
