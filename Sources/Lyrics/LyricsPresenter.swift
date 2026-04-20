@@ -4,8 +4,10 @@ import Combine
 
 /// Fullscreen karaoke-style lyric display. Creates a borderless black window
 /// on the requested screen and renders the current line large + next line
-/// smaller, with word-level highlighting. Driven by a timer that polls the
-/// `PlaybackEngine` for the current playhead.
+/// smaller. Driven by a timer that polls the `PlaybackEngine` for the current
+/// playhead. Highlighting is line-level (not word-level) — hand-edited lyrics
+/// routinely change word counts, which would make any stored per-word timings
+/// stale and wrong.
 final class LyricsPresenter {
     private struct Session {
         let itemID: UUID
@@ -97,54 +99,62 @@ final class LyricsPresenter {
 /// (lyric-only) segment list and tracks which segment is the current "top"
 /// line in the two-line scrolling display.
 final class PresenterState: ObservableObject {
-    /// How far ahead of the actual playhead we treat a line as "current". The
-    /// two-line display already shows the upcoming line at the bottom, so this
-    /// is 0 by default (scroll on segment start, not early).
-    static let leadTime: Double = 0.0
+    /// Maximum lead-in for a lyric line that is preceded by silence. The
+    /// line becomes the highlighted "current" row up to this many seconds
+    /// before its actual start time — but only if the previous line ended
+    /// at least this long ago. Back-to-back lines still switch on the
+    /// new line's actual start so singers don't lose the current line
+    /// while it's still being sung.
+    static let leadTime: Double = 1.0
 
     @Published var visibleSegments: [LyricSegment] = []
     /// Index into `visibleSegments` of the current (top) line, or -1 before
     /// any lyric has come up.
     @Published var topIndex: Int = -1
-    /// Word-level timings for the current top line (used for per-word highlight).
-    @Published var currentWords: [LyricWord] = []
-    @Published var currentTime: Double = 0
+
+    /// Effective trigger time per segment: `start - leadTime` when there's a
+    /// silent gap of at least `leadTime` before the segment; otherwise the
+    /// previous segment's end (back-to-back case). Precomputed here so
+    /// `update` stays O(n) in number of segments without re-deriving this.
+    private var effectiveStarts: [Double] = []
 
     func setDocument(_ doc: LyricsDocument) {
-        // Clean each segment's text and words of music symbols and drop any
-        // segment that's left empty (pure-music passages).
+        // Clean each segment's text of music symbols and drop any segment
+        // that's left empty (pure-music passages).
         visibleSegments = doc.segments.compactMap { seg in
             let cleanedText = Self.stripNonLyricMarks(seg.text)
             guard Self.isLyric(cleanedText) else { return nil }
-            let cleanedWords: [LyricWord] = seg.words.compactMap { w in
-                let ct = Self.stripNonLyricMarks(w.text)
-                guard !ct.isEmpty else { return nil }
-                return LyricWord(text: ct, start: w.start, end: w.end)
-            }
             return LyricSegment(id: seg.id, text: cleanedText,
-                                start: seg.start, end: seg.end,
-                                words: cleanedWords)
+                                start: seg.start, end: seg.end)
         }
+        effectiveStarts = Self.computeEffectiveStarts(visibleSegments, leadTime: Self.leadTime)
         topIndex = -1
-        currentWords = []
     }
 
     func update(time: Double) {
-        self.currentTime = time
-        let adjusted = time + Self.leadTime
-        // Largest i such that visibleSegments[i].start <= adjusted.
+        // Largest i such that effectiveStarts[i] <= time.
         var newTop = -1
-        for (i, seg) in visibleSegments.enumerated() {
-            if seg.start <= adjusted { newTop = i } else { break }
+        for (i, trigger) in effectiveStarts.enumerated() {
+            if trigger <= time { newTop = i } else { break }
         }
         if newTop != topIndex {
             topIndex = newTop
-            if newTop >= 0 {
-                currentWords = visibleSegments[newTop].words.filter { Self.isLyric($0.text) }
-            } else {
-                currentWords = []
-            }
         }
+    }
+
+    /// For each segment, compute the earliest time the presenter should light
+    /// it up: pull forward by `leadTime` when possible, but never before the
+    /// previous segment ends (and never before 0 for the first line).
+    static func computeEffectiveStarts(_ segments: [LyricSegment],
+                                       leadTime: Double) -> [Double] {
+        var out: [Double] = []
+        out.reserveCapacity(segments.count)
+        for (i, seg) in segments.enumerated() {
+            let earliest = seg.start - leadTime
+            let floor = (i == 0) ? 0.0 : segments[i - 1].end
+            out.append(max(floor, earliest))
+        }
+        return out
     }
 
     /// Whisper emits tokens like "[Music]", "[Applause]", "(instrumental)",
@@ -172,11 +182,25 @@ final class PresenterState: ObservableObject {
     }
 }
 
+/// Collects each lyric row's measured height, keyed by segment id. The
+/// presenter needs real heights (not a fixed `rowHeight`) because long lines
+/// wrap to 2+ visual rows and we still need the VStack's `y` offset to land
+/// on the correct segment.
+private struct LineHeightsKey: PreferenceKey {
+    static var defaultValue: [UUID: CGFloat] = [:]
+    static func reduce(value: inout [UUID: CGFloat],
+                       nextValue: () -> [UUID: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, b in b })
+    }
+}
+
 private struct LyricsDisplayView: View {
     @ObservedObject var state: PresenterState
+    @State private var lineHeights: [UUID: CGFloat] = [:]
 
     private let lineFontSize: CGFloat = 72
-    private let rowHeight: CGFloat = 140
+    /// Fallback height used before a row has been measured (first layout).
+    private let fallbackRowHeight: CGFloat = 140
     private let lineSpacing: CGFloat = 30
 
     private var lineFont: Font {
@@ -188,13 +212,22 @@ private struct LyricsDisplayView: View {
             ZStack(alignment: .top) {
                 Color.black
                 // All lines live in one VStack and the whole stack slides up
-                // as a single rigid body on line transitions — no per-word
-                // jitter, because only the container's offset is animated.
+                // as a single rigid body on line transitions. Each row sizes
+                // itself to its wrapped-text height and reports it back via
+                // `LineHeightsKey`.
                 VStack(spacing: lineSpacing) {
                     ForEach(Array(state.visibleSegments.enumerated()), id: \.element.id) { i, seg in
                         lineView(seg, at: i)
-                            .frame(width: max(200, geo.size.width - 120),
-                                   height: rowHeight)
+                            .frame(width: max(200, geo.size.width - 120))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .background(
+                                GeometryReader { proxy in
+                                    Color.clear.preference(
+                                        key: LineHeightsKey.self,
+                                        value: [seg.id: proxy.size.height]
+                                    )
+                                }
+                            )
                             .opacity(opacity(for: i))
                     }
                 }
@@ -202,42 +235,49 @@ private struct LyricsDisplayView: View {
                 .offset(y: stackOffset(in: geo))
             }
             .clipped()
+            .onPreferenceChange(LineHeightsKey.self) { heights in
+                lineHeights = heights
+            }
         }
         .ignoresSafeArea()
-        .animation(.easeInOut(duration: 0.45), value: state.topIndex)
+        // 0.25s is short enough that a line preceded by silence is fully
+        // visible for most of the 1-second `leadTime` buffer (≈0.75 s
+        // fully-opaque before the singer needs to read it), while still
+        // smooth enough that mid-song line-to-line scroll transitions don't
+        // feel jumpy.
+        .animation(.easeInOut(duration: 0.25), value: state.topIndex)
     }
 
     /// Vertical offset for the full VStack of lines such that
     /// `visibleSegments[topIndex]` (or index 0 before the first transition)
-    /// sits at roughly 38 % of the screen height.
+    /// sits at roughly 38 % of the screen height. Heights above the anchor
+    /// are summed from the measured `lineHeights` map; any row not yet
+    /// measured falls back to `fallbackRowHeight`.
     private func stackOffset(in geo: GeometryProxy) -> CGFloat {
         let anchor = geo.size.height * 0.38
         let ref = max(0, state.topIndex)
-        return anchor - CGFloat(ref) * (rowHeight + lineSpacing)
+        var consumed: CGFloat = 0
+        let segs = state.visibleSegments
+        let upper = min(ref, segs.count)
+        for i in 0..<upper {
+            let id = segs[i].id
+            consumed += (lineHeights[id] ?? fallbackRowHeight) + lineSpacing
+        }
+        return anchor - consumed
     }
 
-    /// Always returns the same view structure (a word-level flow layout), so
-    /// SwiftUI preserves identity across transitions — only per-word colors
-    /// change based on whether this line is the current one and whether each
-    /// word has been sung yet. Color changes are NOT individually animated —
-    /// the parent's 0.45s animation governs line transitions as a rigid body.
+    /// Current line renders in full white; the upcoming line is dimmer.
+    /// `Text` wraps naturally at the row's fixed width, so lines longer than
+    /// one screen width flow to multiple visual rows.
+    /// The parent's 0.45s animation governs line transitions as a rigid body.
     private func lineView(_ seg: LyricSegment, at i: Int) -> some View {
-        let words = seg.words.isEmpty
-            ? [LyricWord(text: seg.text, start: seg.start, end: seg.end)]
-            : seg.words
         let isCurrent = (i == state.topIndex)
-        return WrappingHStack(words, spacing: 18, lineSpacing: 12) { word in
-            let isPast = isCurrent && state.currentTime >= word.end
-            let isNow  = isCurrent && state.currentTime >= word.start && state.currentTime < word.end
-            let color: Color = {
-                if isNow { return .yellow }
-                if isPast { return .white }
-                return isCurrent ? .white.opacity(0.7) : .white.opacity(0.85)
-            }()
-            Text(word.text)
-                .font(lineFont)
-                .foregroundColor(color)
-        }
+        let color: Color = isCurrent ? .white : .white.opacity(0.55)
+        return Text(seg.text)
+            .font(lineFont)
+            .foregroundColor(color)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, alignment: .center)
     }
 
     /// Only the top line and its successor are fully visible; everything
@@ -246,85 +286,5 @@ private struct LyricsDisplayView: View {
         guard state.topIndex >= 0 else { return 0 }
         if i == state.topIndex || i == state.topIndex + 1 { return 1 }
         return 0
-    }
-}
-
-/// Tiny flow layout that wraps words naturally on large screens. Uses array
-/// index as identity so repeated words ("la la la") each get their own slot.
-private struct WrappingHStack<Content: View>: View {
-    let words: [LyricWord]
-    let spacing: CGFloat
-    let lineSpacing: CGFloat
-    let content: (LyricWord) -> Content
-
-    init(_ words: [LyricWord], spacing: CGFloat = 12, lineSpacing: CGFloat = 12,
-         @ViewBuilder content: @escaping (LyricWord) -> Content) {
-        self.words = words
-        self.spacing = spacing
-        self.lineSpacing = lineSpacing
-        self.content = content
-    }
-
-    var body: some View {
-        FlowLayout(spacing: spacing, lineSpacing: lineSpacing) {
-            ForEach(words.indices, id: \.self) { i in
-                content(words[i])
-            }
-        }
-    }
-}
-
-private struct FlowLayout: Layout {
-    var spacing: CGFloat
-    var lineSpacing: CGFloat
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = proposal.width ?? .infinity
-        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
-        var totalWidth: CGFloat = 0
-        for sub in subviews {
-            let size = sub.sizeThatFits(.unspecified)
-            if x + size.width > maxWidth, x > 0 {
-                y += rowHeight + lineSpacing
-                x = 0
-                rowHeight = 0
-            }
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-            totalWidth = max(totalWidth, x)
-        }
-        return CGSize(width: min(maxWidth, totalWidth), height: y + rowHeight)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let maxWidth = bounds.width
-        var x: CGFloat = bounds.minX, y: CGFloat = bounds.minY, rowHeight: CGFloat = 0
-        // First pass: compute total width of line and start offset to center-align
-        struct PlacedLine { var items: [(Subviews.Element, CGSize)]; var width: CGFloat; var height: CGFloat }
-        var lines: [PlacedLine] = []
-        var currentLine = PlacedLine(items: [], width: 0, height: 0)
-        for sub in subviews {
-            let size = sub.sizeThatFits(.unspecified)
-            if currentLine.width + (currentLine.items.isEmpty ? 0 : spacing) + size.width > maxWidth, !currentLine.items.isEmpty {
-                lines.append(currentLine)
-                currentLine = PlacedLine(items: [], width: 0, height: 0)
-            }
-            if !currentLine.items.isEmpty { currentLine.width += spacing }
-            currentLine.items.append((sub, size))
-            currentLine.width += size.width
-            currentLine.height = max(currentLine.height, size.height)
-        }
-        if !currentLine.items.isEmpty { lines.append(currentLine) }
-
-        for line in lines {
-            let startX = bounds.minX + (maxWidth - line.width) / 2
-            x = startX
-            rowHeight = line.height
-            for (sub, size) in line.items {
-                sub.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-                x += size.width + spacing
-            }
-            y += rowHeight + lineSpacing
-        }
     }
 }

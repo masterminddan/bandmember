@@ -6,7 +6,13 @@ import Combine
 final class LyricsStore: ObservableObject {
     static let shared = LyricsStore()
 
-    @Published private var cache: [String: LyricsDocument] = [:]
+    /// NOT `@Published` — this is a read-through cache populated during
+    /// `lyrics(for:)` calls, which happen on the hot path of SwiftUI body
+    /// evaluation. Publishing cache writes causes an infinite
+    /// invalidation → re-render → re-read loop. View updates after
+    /// transcription / manual edits are driven by explicit
+    /// `objectWillChange.send()` calls in `save` / `delete`.
+    private var cache: [String: LyricsDocument] = [:]
     /// Sidecar file mtime captured when the entry was cached. Used to detect
     /// external edits / retranscriptions and reload from disk.
     private var cachedMTimes: [String: Date] = [:]
@@ -17,14 +23,27 @@ final class LyricsStore: ObservableObject {
         return audioPath + ".lyrics.json"
     }
 
+    /// Cheap existence probe. Does NOT read or decode the sidecar — use this
+    /// when a view only needs to know whether lyrics exist (e.g. "show the
+    /// presenter controls if any other item has lyrics"). Calling
+    /// `lyrics(for:)` in a loop across a large playlist will beach-ball the
+    /// main thread because each call does a full JSON decode.
+    func hasLyrics(for audioPath: String) -> Bool {
+        guard !audioPath.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: sidecarPath(for: audioPath))
+    }
+
     private func sidecarMTime(_ sidecar: String) -> Date? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: sidecar) else { return nil }
         return attrs[.modificationDate] as? Date
     }
 
     /// Loads from sidecar if not yet cached OR if the sidecar on disk is
-    /// newer than the cached copy. Safe to call from any thread.
+    /// newer than the cached copy. Expected to be called on the main thread
+    /// (typical caller is SwiftUI view body); cache writes are synchronous
+    /// so repeated calls hit the fast path immediately.
     func lyrics(for audioPath: String) -> LyricsDocument? {
+        guard !audioPath.isEmpty else { return nil }
         let sidecar = sidecarPath(for: audioPath)
         let diskMTime = sidecarMTime(sidecar)
 
@@ -36,7 +55,7 @@ final class LyricsStore: ObservableObject {
             return cached
         }
         // If the sidecar doesn't exist, drop any stale cache entry.
-        guard diskMTime != nil else {
+        guard let diskMTime = diskMTime else {
             cache.removeValue(forKey: audioPath)
             cachedMTimes.removeValue(forKey: audioPath)
             return nil
@@ -47,11 +66,8 @@ final class LyricsStore: ObservableObject {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let doc = try decoder.decode(LyricsDocument.self, from: data)
-            let mtime = diskMTime ?? Date()
-            DispatchQueue.main.async {
-                self.cache[audioPath] = doc
-                self.cachedMTimes[audioPath] = mtime
-            }
+            cache[audioPath] = doc
+            cachedMTimes[audioPath] = diskMTime
             debugLog("Lyrics: loaded sidecar for \((audioPath as NSString).lastPathComponent) (\(doc.segments.count) segments, model=\(doc.modelUsed))")
             return doc
         } catch {
@@ -70,6 +86,7 @@ final class LyricsStore: ObservableObject {
             try data.write(to: URL(fileURLWithPath: sidecar))
             // Update cache after successful write so the mtime we record
             // matches what's actually on disk.
+            objectWillChange.send()
             cache[audioPath] = doc
             cachedMTimes[audioPath] = sidecarMTime(sidecar) ?? Date()
             debugLog("Lyrics: saved sidecar for \((audioPath as NSString).lastPathComponent) (\(doc.segments.count) segments)")
@@ -79,6 +96,7 @@ final class LyricsStore: ObservableObject {
     }
 
     func delete(for audioPath: String) {
+        objectWillChange.send()
         cache.removeValue(forKey: audioPath)
         cachedMTimes.removeValue(forKey: audioPath)
         let sidecar = sidecarPath(for: audioPath)

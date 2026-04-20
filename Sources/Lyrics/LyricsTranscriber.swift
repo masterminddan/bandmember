@@ -62,7 +62,7 @@ final class LyricsTranscriber: ObservableObject {
                     language: "en",
                     skipSpecialTokens: true,
                     withoutTimestamps: false,
-                    wordTimestamps: true
+                    wordTimestamps: false
                 )
 
                 let transcribeStart = Date()
@@ -135,18 +135,10 @@ final class LyricsTranscriber: ObservableObject {
         for r in results {
             if language == nil { language = r.language }
             for seg in r.segments {
-                let words: [LyricWord] = (seg.words ?? []).map {
-                    LyricWord(
-                        text: $0.word.trimmingCharacters(in: .whitespaces),
-                        start: Double($0.start),
-                        end: Double($0.end)
-                    )
-                }
                 segments.append(LyricSegment(
                     text: seg.text.trimmingCharacters(in: .whitespaces),
                     start: Double(seg.start),
-                    end: Double(seg.end),
-                    words: words
+                    end: Double(seg.end)
                 ))
             }
         }

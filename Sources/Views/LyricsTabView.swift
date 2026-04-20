@@ -22,16 +22,21 @@ struct LyricsTabView: View {
     }
 
     var body: some View {
-        ScrollView {
+        // Resolve `doc` once per body evaluation. The computed property calls
+        // `lyricsStore.lyrics(for:)`, which stats the sidecar (and on the
+        // first access decodes the JSON). Recomputing it from every subview
+        // re-stats on every body pass.
+        let resolvedDoc = doc
+        return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if item?.mediaType != .audio {
                     unavailableBanner
                 } else {
                     modelPickerRow
-                    jobStatusRow
-                    presenterControls
+                    jobStatusRow(doc: resolvedDoc)
+                    presenterControls(doc: resolvedDoc)
                     Divider()
-                    segmentList
+                    segmentList(doc: resolvedDoc)
                     Spacer(minLength: 20)
                 }
             }
@@ -78,7 +83,7 @@ struct LyricsTabView: View {
     }
 
     @ViewBuilder
-    private var jobStatusRow: some View {
+    private func jobStatusRow(doc: LyricsDocument?) -> some View {
         let state = transcriber.status(for: filePath)
         HStack(spacing: 10) {
             switch state {
@@ -115,8 +120,12 @@ struct LyricsTabView: View {
     }
 
     @ViewBuilder
-    private var presenterControls: some View {
-        if doc != nil || store.items.contains(where: { $0.id != itemID && lyricsStore.lyrics(for: $0.filePath) != nil }) {
+    private func presenterControls(doc: LyricsDocument?) -> some View {
+        // Use `hasLyrics(for:)` — a pure `fileExists` probe — instead of
+        // `lyrics(for:)`, which decodes the sidecar JSON. On first access
+        // after launch the decode version synchronously reads every item's
+        // sidecar on the main thread and hangs the UI.
+        if doc != nil || store.items.contains(where: { $0.id != itemID && lyricsStore.hasLyrics(for: $0.filePath) }) {
             VStack(alignment: .leading, spacing: 8) {
                 Divider()
                 Toggle(isOn: Binding(
@@ -159,7 +168,7 @@ struct LyricsTabView: View {
     }
 
     @ViewBuilder
-    private var segmentList: some View {
+    private func segmentList(doc: LyricsDocument?) -> some View {
         if let doc = doc {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
@@ -181,10 +190,10 @@ struct LyricsTabView: View {
                             d.segments[i].text = newText
                             lyricsStore.save(d, for: filePath)
                         },
-                        onNudge: { startDelta, endDelta in
+                        onDelete: {
                             var d = doc
-                            d.segments[i].start = max(0, d.segments[i].start + startDelta)
-                            d.segments[i].end = max(d.segments[i].start + 0.1, d.segments[i].end + endDelta)
+                            guard i < d.segments.count else { return }
+                            d.segments.remove(at: i)
                             lyricsStore.save(d, for: filePath)
                         }
                     )
@@ -210,7 +219,7 @@ struct LyricsTabView: View {
 private struct LyricSegmentRow: View {
     let segment: LyricSegment
     let onChange: (String) -> Void
-    let onNudge: (Double, Double) -> Void
+    let onDelete: () -> Void
 
     @State private var editing = false
     @State private var draft: String = ""
@@ -223,18 +232,22 @@ private struct LyricSegmentRow: View {
                     .font(.system(.caption2, design: .monospaced))
                     .foregroundColor(.secondary)
                 Spacer()
-                Button(action: { onNudge(-0.1, -0.1) }) { Image(systemName: "arrow.left") }
-                    .buttonStyle(.plain)
-                    .font(.caption2)
-                    .help("Nudge earlier 100 ms")
-                Button(action: { onNudge(0.1, 0.1) }) { Image(systemName: "arrow.right") }
-                    .buttonStyle(.plain)
-                    .font(.caption2)
-                    .help("Nudge later 100 ms")
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.plain)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .help("Delete this segment")
             }
             if editing {
-                TextField("", text: $draft)
+                // `.axis(.vertical)` lets the field grow for long lyrics so
+                // the text isn't truncated mid-edit the way a single-line
+                // field would. Enter still commits (via `.onSubmit`); users
+                // don't need literal newlines inside a lyric line.
+                TextField("", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...5)
                     .focused($focused)
                     .onSubmit { commit() }
                     .onExitCommand { revert() }
