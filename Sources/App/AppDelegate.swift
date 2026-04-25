@@ -14,6 +14,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return event
             }
 
+            // The lyrics editor runs in its own NSWindow and owns its own
+            // spacebar (play/pause). When an event is destined for that
+            // window, bail out so the playlist doesn't also fire.
+            if event.window?.identifier?.rawValue == lyricsEditorWindowIdentifier {
+                return event
+            }
+
             // Cmd+key shortcuts
             if event.modifierFlags.contains(.command) {
                 switch event.charactersIgnoringModifiers?.lowercased() {

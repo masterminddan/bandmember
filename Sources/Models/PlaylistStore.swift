@@ -2,6 +2,7 @@ import SwiftUI
 import Combine
 
 private let kLastPlaylistPath = "lastPlaylistPath"
+private let kLastSelectedItemIDs = "lastSelectedItemIDs"
 
 class PlaylistStore: ObservableObject {
     @Published var items: [PlaylistItem] = []
@@ -9,6 +10,20 @@ class PlaylistStore: ObservableObject {
     @Published var playingItemIDs: Set<UUID> = []
     @Published var currentFilePath: URL? = nil
     private var savedSnapshot: [PlaylistItem] = []
+
+    /// Mirrors `selectedIDs` to `UserDefaults` on every change so the
+    /// selection survives across launches. Restored by `restoreLastSession`
+    /// after the playlist itself loads.
+    private var selectionPersistenceCancellable: AnyCancellable?
+
+    init() {
+        selectionPersistenceCancellable = $selectedIDs
+            .dropFirst()
+            .sink { ids in
+                let strs = ids.map { $0.uuidString }
+                UserDefaults.standard.set(strs, forKey: kLastSelectedItemIDs)
+            }
+    }
 
     // MARK: - Undo/Redo
 
@@ -153,7 +168,20 @@ class PlaylistStore: ObservableObject {
     func restoreLastSession() {
         guard let path = UserDefaults.standard.string(forKey: kLastPlaylistPath),
               FileManager.default.fileExists(atPath: path) else { return }
+        // Capture the saved selection BEFORE `load` runs — load resets
+        // `selectedIDs = []`, which fires the persistence sink and clobbers
+        // the very thing we're trying to restore.
+        let savedSelection: Set<UUID> = (UserDefaults.standard.array(forKey: kLastSelectedItemIDs)
+            as? [String])
+            .map { Set($0.compactMap(UUID.init(uuidString:))) } ?? []
+
         try? load(from: URL(fileURLWithPath: path))
+
+        let stillPresent = savedSelection.intersection(items.map(\.id))
+        if !stillPresent.isEmpty {
+            selectedIDs = stillPresent
+        }
+
         // Clear undo stack on launch — nothing to undo from a fresh start
         undoStack.removeAll()
         redoStack.removeAll()

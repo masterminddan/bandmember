@@ -22,6 +22,10 @@ struct LyricsTabView: View {
         guard !filePath.isEmpty else { return nil }
         return lyricsStore.lyrics(for: filePath)
     }
+    private var beats: [Double] {
+        guard let item = item else { return [] }
+        return TempoCoordinator.shared.tempoData(forItemID: item.id, store: store)?.beats ?? []
+    }
 
     var body: some View {
         // Resolve `doc` once per body evaluation. The computed property calls
@@ -38,7 +42,7 @@ struct LyricsTabView: View {
                     jobStatusRow(doc: resolvedDoc)
                     presenterControls(doc: resolvedDoc)
                     Divider()
-                    segmentList(doc: resolvedDoc)
+                    lyricsDisplay(doc: resolvedDoc)
                     Spacer(minLength: 20)
                 }
             }
@@ -47,10 +51,38 @@ struct LyricsTabView: View {
         .sheet(isPresented: $showingFixLyricsSheet) {
             FixLyricsSheet(
                 pastedText: $fixLyricsDraft,
-                isPresented: $showingFixLyricsSheet,
-                onSubmit: { text in applyFixLyrics(text) }
+                onCancel: { showingFixLyricsSheet = false },
+                onSubmit: { text in
+                    applyFixLyrics(text)
+                    showingFixLyricsSheet = false
+                }
             )
         }
+    }
+
+    /// Snapshot handed to the editor on open. If lyrics don't exist yet we
+    /// hand over an empty doc so the user can build lyrics from scratch —
+    /// the editor persists via `LyricsStore.save` on the first commit, which
+    /// creates the sidecar.
+    private var docForEditor: LyricsDocument {
+        if let doc = doc { return doc }
+        return LyricsDocument(
+            audioFilePath: filePath,
+            segments: [],
+            modelUsed: "manual",
+            language: nil,
+            createdAt: Date()
+        )
+    }
+
+    private func openEditor() {
+        guard !filePath.isEmpty, FileManager.default.fileExists(atPath: filePath) else { return }
+        LyricsEditorWindow.show(
+            filePath: filePath,
+            doc: docForEditor,
+            beats: beats,
+            title: item?.name ?? ""
+        )
     }
 
     // MARK: - Subviews
@@ -197,18 +229,39 @@ struct LyricsTabView: View {
         }
     }
 
+    /// Read-only view of the lyrics text. All editing (including nudge /
+    /// duration / timestamp tweaks) lives in the Lyrics Editor sheet — the
+    /// tab just shows what's there and offers the buttons to open that sheet,
+    /// re-transcribe, import corrected text, or clear.
+    ///
+    /// The header row (including the Edit button) is always visible for audio
+    /// items, even before lyrics exist, so the user can open the editor and
+    /// build lyrics from scratch on a blank doc.
     @ViewBuilder
-    private func segmentList(doc: LyricsDocument?) -> some View {
-        if let doc = doc {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Lyrics").font(.headline)
-                    // Created timestamp sits next to the section header now,
-                    // keeping the Transcribe/Fix Lyrics button column clean.
+    private func lyricsDisplay(doc: LyricsDocument?) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Edit button on its own row. The inspector column is narrow
+            // (~280 px); sharing a row with the "Lyrics" title + date + Clear
+            // was squeezing the button out entirely.
+            Button {
+                openEditor()
+            } label: {
+                Label("Edit Lyrics", systemImage: "slider.horizontal.below.rectangle")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(filePath.isEmpty || !FileManager.default.fileExists(atPath: filePath))
+            .help(doc == nil
+                  ? "Open the lyrics editor and build lyrics from scratch"
+                  : "Open the lyrics editor to adjust timing and text")
+
+            HStack(alignment: .firstTextBaseline) {
+                Text("Lyrics").font(.headline)
+                Spacer()
+                if let doc = doc {
                     Text(doc.createdAt.formatted(date: .abbreviated, time: .shortened))
                         .font(.caption2)
                         .foregroundColor(.secondary)
-                    Spacer()
                     Button(role: .destructive) {
                         lyricsStore.delete(for: filePath)
                     } label: {
@@ -217,85 +270,28 @@ struct LyricsTabView: View {
                     .buttonStyle(.plain)
                     .font(.caption)
                 }
-                ForEach(Array(doc.segments.enumerated()), id: \.element.id) { i, seg in
-                    LyricSegmentRow(
-                        segment: seg,
-                        onChange: { newText in
-                            var d = doc
-                            d.segments[i].text = newText
-                            lyricsStore.save(d, for: filePath)
-                        },
-                        onNudge: { delta in
-                            var d = doc
-                            guard i < d.segments.count else { return }
-
-                            // Shift the current lyric's whole range by `delta`,
-                            // preserving its duration.
-                            d.segments[i].start = max(0, d.segments[i].start + delta)
-                            d.segments[i].end = max(d.segments[i].start + 0.1,
-                                                    d.segments[i].end + delta)
-
-                            // Carry the adjacent boundary along so the gap (or
-                            // lack of gap) with the neighbor is preserved. When
-                            // nudging earlier, pull the previous lyric's end
-                            // back; when nudging later, push the next lyric's
-                            // start forward — clamping so neither neighbor
-                            // collapses through its own start/end.
-                            if delta < 0, i > 0 {
-                                let minEnd = d.segments[i-1].start + 0.1
-                                d.segments[i-1].end = max(minEnd,
-                                                          d.segments[i-1].end + delta)
-                            } else if delta > 0, i + 1 < d.segments.count {
-                                let maxStart = d.segments[i+1].end - 0.1
-                                d.segments[i+1].start = min(maxStart,
-                                                            d.segments[i+1].start + delta)
-                            }
-
-                            lyricsStore.save(d, for: filePath)
-                        },
-                        onEditStart: { newStart in
-                            var d = doc
-                            guard i < d.segments.count else { return }
-                            // Clamp into a valid range: non-negative and
-                            // strictly before this lyric's end.
-                            let clamped = max(0, min(newStart, d.segments[i].end - 0.1))
-                            let delta = clamped - d.segments[i].start
-                            d.segments[i].start = clamped
-                            // Carry the previous lyric's end along by the same
-                            // delta, like the ← nudge — preserves whatever
-                            // gap/overlap existed before the edit.
-                            if i > 0 {
-                                let minEnd = d.segments[i-1].start + 0.1
-                                d.segments[i-1].end = max(minEnd,
-                                                          d.segments[i-1].end + delta)
-                            }
-                            lyricsStore.save(d, for: filePath)
-                        },
-                        onEditEnd: { newEnd in
-                            var d = doc
-                            guard i < d.segments.count else { return }
-                            // Clamp: end must stay strictly after start.
-                            let clamped = max(d.segments[i].start + 0.1, newEnd)
-                            let delta = clamped - d.segments[i].end
-                            d.segments[i].end = clamped
-                            // Carry the next lyric's start along by the same
-                            // delta, like the → nudge.
-                            if i + 1 < d.segments.count {
-                                let maxStart = d.segments[i+1].end - 0.1
-                                d.segments[i+1].start = min(maxStart,
-                                                            d.segments[i+1].start + delta)
-                            }
-                            lyricsStore.save(d, for: filePath)
-                        },
-                        onDelete: {
-                            var d = doc
-                            guard i < d.segments.count else { return }
-                            d.segments.remove(at: i)
-                            lyricsStore.save(d, for: filePath)
-                        }
-                    )
+            }
+            ScrollView {
+                if let doc = doc, !doc.segments.isEmpty {
+                    Text(doc.segments.map(\.text).joined(separator: "\n"))
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                } else {
+                    Text("No lyrics yet. Transcribe above, or click Edit Lyrics to start a blank timeline.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
                 }
             }
+            .frame(minHeight: 140, maxHeight: 420)
+            .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.06)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(Color.secondary.opacity(0.2))
+            )
         }
     }
 
@@ -336,7 +332,7 @@ struct LyricsTabView: View {
 
 private struct FixLyricsSheet: View {
     @Binding var pastedText: String
-    @Binding var isPresented: Bool
+    let onCancel: () -> Void
     let onSubmit: (String) -> Void
 
     var body: some View {
@@ -355,205 +351,16 @@ private struct FixLyricsSheet: View {
                 )
             HStack {
                 Spacer()
-                Button("Cancel") { isPresented = false }
+                Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
-                Button("Submit") {
-                    onSubmit(pastedText)
-                    isPresented = false
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(pastedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("Submit") { onSubmit(pastedText) }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(pastedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(20)
         .frame(width: 540, height: 420)
-    }
-}
-
-// MARK: - Segment row
-
-private struct LyricSegmentRow: View {
-    let segment: LyricSegment
-    let onChange: (String) -> Void
-    /// `delta` is applied to both start and end of this lyric (±0.1 s) so the
-    /// whole range shifts while keeping its duration. The parent handler is
-    /// also responsible for carrying the adjacent boundary: nudging earlier
-    /// pulls the previous lyric's end back by the same amount, nudging later
-    /// pushes the next lyric's start forward.
-    let onNudge: (Double) -> Void
-    /// Direct edit of this lyric's start time. The parent clamps so start
-    /// stays >= 0 and < end, then carries the previous lyric's end along
-    /// by the same delta — same neighbor semantic as the ← nudge, so the
-    /// gap (or lack of one) with the previous lyric is preserved.
-    let onEditStart: (Double) -> Void
-    /// Direct edit of this lyric's end time. The parent clamps so end stays
-    /// > start, then carries the next lyric's start along by the same
-    /// delta — same neighbor semantic as the → nudge.
-    let onEditEnd: (Double) -> Void
-    let onDelete: () -> Void
-
-    @State private var editing = false
-    @State private var draft: String = ""
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                EditableTimestamp(value: segment.start, onCommit: onEditStart)
-                Text("→")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundColor(.secondary)
-                EditableTimestamp(value: segment.end, onCommit: onEditEnd)
-                Spacer()
-                Button(action: { onNudge(-0.1) }) {
-                    Image(systemName: "arrow.left")
-                }
-                .buttonStyle(.plain)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .help("Nudge 100 ms earlier (also pulls previous lyric's end back)")
-                Button(action: { onNudge(0.1) }) {
-                    Image(systemName: "arrow.right")
-                }
-                .buttonStyle(.plain)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .help("Nudge 100 ms later (also pushes next lyric's start forward)")
-                Button(role: .destructive, action: onDelete) {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.plain)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .help("Delete this lyric")
-            }
-            if editing {
-                // `.axis(.vertical)` lets the field grow for long lyrics so
-                // the text isn't truncated mid-edit the way a single-line
-                // field would. Enter still commits (via `.onSubmit`); users
-                // don't need literal newlines inside a lyric line.
-                TextField("", text: $draft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...5)
-                    .focused($focused)
-                    .onSubmit { commit() }
-                    .onExitCommand { revert() }
-                    .onChange(of: focused) { _, isFocused in
-                        // Losing focus (clicked outside, tab, etc.) reverts.
-                        if !isFocused && editing { revert() }
-                    }
-            } else {
-                Text(segment.text)
-                    .font(.callout)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { startEditing() }
-            }
-        }
-        .padding(6)
-        .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.06)))
-    }
-
-    private func startEditing() {
-        draft = segment.text
-        editing = true
-        // Request focus on the next runloop tick so the TextField exists.
-        DispatchQueue.main.async { focused = true }
-    }
-
-    private func commit() {
-        let newValue = draft
-        editing = false
-        focused = false
-        if newValue != segment.text { onChange(newValue) }
-    }
-
-    private func revert() {
-        draft = segment.text
-        editing = false
-        focused = false
-    }
-}
-
-// MARK: - Editable timestamp
-
-/// Double-click to edit a `M:SS.hh` timestamp in place. Accepts either the
-/// `M:SS.hh` format on commit or a plain decimal number of seconds. Enter
-/// commits, Escape or focus-loss reverts. Invalid input reverts silently.
-private struct EditableTimestamp: View {
-    let value: Double
-    let onCommit: (Double) -> Void
-
-    @State private var editing = false
-    @State private var draft: String = ""
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        Group {
-            if editing {
-                TextField("", text: $draft)
-                    .textFieldStyle(.plain)
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundColor(.primary)
-                    .frame(width: 54)
-                    .focused($focused)
-                    .onSubmit { commit() }
-                    .onExitCommand { revert() }
-                    .onChange(of: focused) { _, isFocused in
-                        if !isFocused && editing { revert() }
-                    }
-            } else {
-                Text(Self.format(value))
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundColor(.secondary)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { startEditing() }
-                    .help("Double-click to edit")
-            }
-        }
-    }
-
-    private func startEditing() {
-        draft = Self.format(value)
-        editing = true
-        // Ask for focus on the next tick so the TextField exists to receive it.
-        DispatchQueue.main.async { focused = true }
-    }
-
-    private func commit() {
-        editing = false
-        focused = false
-        if let parsed = Self.parse(draft), abs(parsed - value) > 0.0001 {
-            onCommit(parsed)
-        }
-    }
-
-    private func revert() {
-        editing = false
-        focused = false
-    }
-
-    static func format(_ t: Double) -> String {
-        let mins = Int(t) / 60
-        let secs = t - Double(mins * 60)
-        return String(format: "%d:%05.2f", mins, secs)
-    }
-
-    /// Accepts `M:SS.hh` (e.g. `2:01.96`) or a plain decimal in seconds
-    /// (e.g. `121.96`). Returns nil if the input can't be parsed.
-    static func parse(_ s: String) -> Double? {
-        let trimmed = s.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty { return nil }
-        if trimmed.contains(":") {
-            let parts = trimmed.split(separator: ":")
-            guard parts.count == 2,
-                  let mins = Int(parts[0]),
-                  let secs = Double(parts[1]),
-                  mins >= 0, secs >= 0 else { return nil }
-            return Double(mins) * 60 + secs
-        }
-        return Double(trimmed).flatMap { $0 >= 0 ? $0 : nil }
     }
 }
 
