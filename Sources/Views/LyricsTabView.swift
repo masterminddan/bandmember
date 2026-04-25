@@ -38,10 +38,15 @@ struct LyricsTabView: View {
                 if item?.mediaType != .audio {
                     unavailableBanner
                 } else {
+                    // Display options live at the top — the user decides
+                    // *whether* lyrics show when this item is triggered
+                    // before they care about generating or editing them.
+                    presenterControls
+                    Divider()
+                    // Everything below belongs to one logical group:
+                    // generating and editing the lyrics for this track.
                     modelPickerRow
                     jobStatusRow(doc: resolvedDoc)
-                    presenterControls(doc: resolvedDoc)
-                    Divider()
                     lyricsDisplay(doc: resolvedDoc)
                     Spacer(minLength: 20)
                 }
@@ -136,10 +141,11 @@ struct LyricsTabView: View {
         let state = transcriber.status(for: filePath)
         switch state {
         case .idle, .done:
-            // Transcribe on top; Fix Lyrics beneath (only when lyrics exist).
-            // Both stretch full-width so long labels like "Re-transcribe" fit
-            // comfortably and the stack reads as a small primary/secondary
-            // action group.
+            // All three actions stack with the same 6 px gap so the
+            // spacing between Transcribe / Fix Lyrics / Edit Lyrics is
+            // identical to the spacing when Fix Lyrics is hidden (no
+            // doc yet). Stretching to full width lets long labels like
+            // "Re-transcribe" fit comfortably.
             VStack(spacing: 6) {
                 Button(action: startTranscription) {
                     Label(doc == nil ? "Transcribe" : "Re-transcribe",
@@ -157,6 +163,18 @@ struct LyricsTabView: View {
                     .buttonStyle(.bordered)
                     .help("Paste corrected lyrics and re-apply the existing timestamps to them.")
                 }
+
+                Button {
+                    openEditor()
+                } label: {
+                    Label("Edit Lyrics", systemImage: "slider.horizontal.below.rectangle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(filePath.isEmpty || !FileManager.default.fileExists(atPath: filePath))
+                .help(doc == nil
+                      ? "Open the lyrics editor and build lyrics from scratch"
+                      : "Open the lyrics editor to adjust timing and text")
             }
         case .loadingModel:
             HStack(spacing: 10) {
@@ -181,50 +199,47 @@ struct LyricsTabView: View {
         }
     }
 
-    @ViewBuilder
-    private func presenterControls(doc: LyricsDocument?) -> some View {
-        // Use `hasLyrics(for:)` — a pure `fileExists` probe — instead of
-        // `lyrics(for:)`, which decodes the sidecar JSON. On first access
-        // after launch the decode version synchronously reads every item's
-        // sidecar on the main thread and hangs the UI.
-        if doc != nil || store.items.contains(where: { $0.id != itemID && lyricsStore.hasLyrics(for: $0.filePath) }) {
-            VStack(alignment: .leading, spacing: 8) {
-                Divider()
-                Toggle(isOn: Binding(
-                    get: { item?.showLyrics ?? false },
-                    set: { new in
+    /// Always shown at the top of the tab — even before any lyrics
+    /// exist, so the user can configure display behavior before
+    /// transcribing. The toggle and target picker are no-ops when the
+    /// item's auto-follow chain has no lyrics, so it's safe to show
+    /// unconditionally.
+    private var presenterControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: Binding(
+                get: { item?.showLyrics ?? false },
+                set: { new in
+                    guard itemIndex < store.items.count else { return }
+                    store.pushUndo()
+                    store.items[itemIndex].showLyrics = new
+                }
+            )) {
+                VStack(alignment: .leading) {
+                    Text("Display lyrics when triggered")
+                    Text("Opens a fullscreen lyric window on the target display when this item is played.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+
+            HStack {
+                Text("Target Display").font(.caption).foregroundColor(.secondary)
+                Spacer()
+                Picker("Display", selection: Binding(
+                    get: { item?.targetDisplayIndex ?? 0 },
+                    set: { newValue in
                         guard itemIndex < store.items.count else { return }
                         store.pushUndo()
-                        store.items[itemIndex].showLyrics = new
+                        store.items[itemIndex].targetDisplayIndex = newValue
                     }
                 )) {
-                    VStack(alignment: .leading) {
-                        Text("Display lyrics when triggered")
-                        Text("Opens a fullscreen lyric window on the target display when this item is played.")
-                            .font(.caption).foregroundColor(.secondary)
-                    }
+                    Text("Main Display").tag(0)
+                    Text("2nd Display").tag(1)
                 }
-
-                HStack {
-                    Text("Target Display").font(.caption).foregroundColor(.secondary)
-                    Spacer()
-                    Picker("Display", selection: Binding(
-                        get: { item?.targetDisplayIndex ?? 0 },
-                        set: { newValue in
-                            guard itemIndex < store.items.count else { return }
-                            store.pushUndo()
-                            store.items[itemIndex].targetDisplayIndex = newValue
-                        }
-                    )) {
-                        Text("Main Display").tag(0)
-                        Text("2nd Display").tag(1)
-                    }
-                    .labelsHidden()
-                }
-                if (item?.targetDisplayIndex ?? 0) == 1 && NSScreen.screens.count < 2 {
-                    Text("2nd display not connected — lyrics will not be shown")
-                        .font(.caption2).foregroundColor(.orange)
-                }
+                .labelsHidden()
+            }
+            if (item?.targetDisplayIndex ?? 0) == 1 && NSScreen.screens.count < 2 {
+                Text("2nd display not connected — lyrics will not be shown")
+                    .font(.caption2).foregroundColor(.orange)
             }
         }
     }
@@ -240,21 +255,9 @@ struct LyricsTabView: View {
     @ViewBuilder
     private func lyricsDisplay(doc: LyricsDocument?) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Edit button on its own row. The inspector column is narrow
-            // (~280 px); sharing a row with the "Lyrics" title + date + Clear
-            // was squeezing the button out entirely.
-            Button {
-                openEditor()
-            } label: {
-                Label("Edit Lyrics", systemImage: "slider.horizontal.below.rectangle")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(filePath.isEmpty || !FileManager.default.fileExists(atPath: filePath))
-            .help(doc == nil
-                  ? "Open the lyrics editor and build lyrics from scratch"
-                  : "Open the lyrics editor to adjust timing and text")
-
+            // Edit Lyrics now lives with Transcribe / Fix Lyrics in
+            // `jobStatusRow` so the three buttons share consistent
+            // vertical spacing. The text panel below stays.
             HStack(alignment: .firstTextBaseline) {
                 Text("Lyrics").font(.headline)
                 Spacer()
@@ -271,22 +274,26 @@ struct LyricsTabView: View {
                     .font(.caption)
                 }
             }
-            ScrollView {
+            // No inner ScrollView — the outer tab already scrolls. Letting
+            // this panel grow as tall as the lyrics need keeps the page a
+            // single fluid column instead of nesting a tiny scroller.
+            Group {
                 if let doc = doc, !doc.segments.isEmpty {
                     Text(doc.segments.map(\.text).joined(separator: "\n"))
                         .font(.callout)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(10)
                 } else {
                     Text("No lyrics yet. Transcribe above, or click Edit Lyrics to start a blank timeline.")
                         .font(.callout)
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(10)
                 }
             }
-            .frame(minHeight: 140, maxHeight: 420)
             .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.06)))
             .overlay(
                 RoundedRectangle(cornerRadius: 4)
