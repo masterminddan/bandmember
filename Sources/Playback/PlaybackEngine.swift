@@ -9,6 +9,10 @@ class PlaybackEngine: ObservableObject {
 
     // ── Audio engine (shared by all audio cues) ──────────────────────
     private let audioEngine = AVAudioEngine()
+    /// Brick-wall safety limiter inserted between mainMixerNode and outputNode.
+    /// Catches inter-sample peaks introduced by mono-summing or by users pushing
+    /// per-cue volume above unity, so FOH never sees a clipped signal.
+    private var outputLimiter: AVAudioUnitEffect?
 
     struct AudioCue {
         let playerNode: AVAudioPlayerNode
@@ -43,6 +47,36 @@ class PlaybackEngine: ObservableObject {
             name: "BandMember Channel Gain",
             version: 1
         )
+        installOutputLimiter()
+    }
+
+    /// Inserts an Apple PeakLimiter between mainMixerNode and outputNode so the
+    /// final stereo bus is brick-walled at ~0 dBFS. AVAudioEngine implicitly
+    /// connects mainMixerNode → outputNode the first time mainMixerNode is
+    /// referenced; we tear that down and splice in the limiter.
+    private func installOutputLimiter() {
+        let desc = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: kAudioUnitSubType_PeakLimiter,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+        let limiter = AVAudioUnitEffect(audioComponentDescription: desc)
+        let mainMixer = audioEngine.mainMixerNode  // forces implicit attach + connection
+        let output    = audioEngine.outputNode
+        audioEngine.disconnectNodeOutput(mainMixer)
+        audioEngine.attach(limiter)
+        audioEngine.connect(mainMixer, to: limiter, format: nil)
+        audioEngine.connect(limiter,   to: output,  format: nil)
+
+        // Tighten attack/decay for transient-heavy backing tracks. Pre-gain
+        // stays at 0 dB — loudness is the user's job via per-cue volume.
+        AudioUnitSetParameter(limiter.audioUnit, kLimiterParam_AttackTime,
+                              kAudioUnitScope_Global, 0, 0.005, 0)
+        AudioUnitSetParameter(limiter.audioUnit, kLimiterParam_DecayTime,
+                              kAudioUnitScope_Global, 0, 0.030, 0)
+        outputLimiter = limiter
     }
 
     deinit { stopAll() }
@@ -180,6 +214,7 @@ class PlaybackEngine: ObservableObject {
             cue.mixerNode.volume = item.masterVolume
             cue.gainAU.leftGain  = item.leftVolume
             cue.gainAU.rightGain = item.rightVolume
+            cue.gainAU.routing   = item.outputRouting.auMode
         }
         if let player = videoPlayers[item.id] {
             player.volume = item.masterVolume
@@ -299,6 +334,7 @@ class PlaybackEngine: ObservableObject {
 
         gainAU.leftGain  = item.leftVolume
         gainAU.rightGain = item.rightVolume
+        gainAU.routing   = item.outputRouting.auMode
         mixer.volume     = item.masterVolume
 
         audioEngine.attach(playerNode)

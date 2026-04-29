@@ -15,6 +15,9 @@ class WaveformCache {
 struct WaveformData {
     let leftSamples: [Float]
     let rightSamples: [Float]
+    /// Per-chunk peak of |(L + R) * 0.7071|, matching what ChannelGainAU
+    /// actually renders in mono-sum routing modes.
+    let monoSumSamples: [Float]
     let duration: Double
 }
 
@@ -39,8 +42,12 @@ enum WaveformGenerator {
 
         var leftSamples: [Float] = []
         var rightSamples: [Float] = []
+        var monoSumSamples: [Float] = []
         leftSamples.reserveCapacity(sampleCount)
         rightSamples.reserveCapacity(sampleCount)
+        monoSumSamples.reserveCapacity(sampleCount)
+
+        let monoSumScale: Float = 0.7071068
 
         for _ in 0..<sampleCount {
             do {
@@ -49,27 +56,39 @@ enum WaveformGenerator {
             guard buffer.frameLength > 0 else { break }
 
             let frames = Int(buffer.frameLength)
+            let lData = buffer.floatChannelData?[0]
+            let rData = (channels >= 2) ? buffer.floatChannelData?[1] : nil
 
-            // Left channel (always channel 0)
             var leftPeak: Float = 0
-            if let data = buffer.floatChannelData?[0] {
-                for j in 0..<frames { leftPeak = max(leftPeak, abs(data[j])) }
-            }
-            leftSamples.append(leftPeak)
-
-            // Right channel (channel 1 if stereo, otherwise mirror left)
             var rightPeak: Float = 0
-            if channels >= 2, let data = buffer.floatChannelData?[1] {
-                for j in 0..<frames { rightPeak = max(rightPeak, abs(data[j])) }
-            } else {
+            var sumPeak: Float = 0
+
+            if let l = lData, let r = rData {
+                for j in 0..<frames {
+                    let lv = l[j], rv = r[j]
+                    leftPeak  = max(leftPeak,  abs(lv))
+                    rightPeak = max(rightPeak, abs(rv))
+                    sumPeak   = max(sumPeak,   abs((lv + rv) * monoSumScale))
+                }
+            } else if let l = lData {
+                // Mono source: L mirrors to R, sum = L * sqrt(2) * 0.7071 = L
+                for j in 0..<frames {
+                    let lv = l[j]
+                    leftPeak = max(leftPeak, abs(lv))
+                }
                 rightPeak = leftPeak
+                sumPeak   = leftPeak
             }
+
+            leftSamples.append(leftPeak)
             rightSamples.append(rightPeak)
+            monoSumSamples.append(sumPeak)
         }
 
         return leftSamples.isEmpty ? nil : WaveformData(
             leftSamples: leftSamples,
             rightSamples: rightSamples,
+            monoSumSamples: monoSumSamples,
             duration: duration
         )
     }
@@ -101,21 +120,24 @@ struct WaveformView: View {
 
     private var duration: Double { waveform?.duration ?? 0 }
     private var isPlaying: Bool { store.playingItemIDs.contains(itemID) }
+    private var routing: OutputRouting {
+        store.items.first(where: { $0.id == itemID })?.outputRouting ?? .stereo
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Waveform").font(.caption).foregroundColor(.secondary)
 
             HStack(spacing: 2) {
-                // Channel labels
+                // Channel labels — dimmed when that side is muted by routing.
                 VStack(spacing: 0) {
                     Text("L")
                         .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(.blue)
+                        .foregroundColor(routing == .monoRight ? .secondary.opacity(0.4) : .blue)
                         .frame(maxHeight: .infinity)
                     Text("R")
                         .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(.orange)
+                        .foregroundColor(routing == .monoLeft ? .secondary.opacity(0.4) : .orange)
                         .frame(maxHeight: .infinity)
                 }
                 .frame(width: 12)
@@ -138,19 +160,42 @@ struct WaveformView: View {
                                         .frame(width: playheadX(in: geo.size.width))
                                 }
 
-                                StereoWaveformShape(
-                                    samples: wf.leftSamples,
-                                    gain: masterVolume * leftVolume,
-                                    flipped: false
-                                )
-                                .fill(Color.blue.opacity(0.6))
+                                // Top half = LEFT output channel, bottom half = RIGHT output channel.
+                                // In mono modes, the active side draws the pre-summed L+R waveform
+                                // and the muted side draws nothing — matching what the AU sends.
+                                let topSamples: [Float] = {
+                                    switch routing {
+                                    case .stereo:    return wf.leftSamples
+                                    case .monoLeft:  return wf.monoSumSamples
+                                    case .monoRight: return []
+                                    }
+                                }()
+                                let topGain: Float = {
+                                    switch routing {
+                                    case .stereo, .monoLeft: return masterVolume * leftVolume
+                                    case .monoRight:         return 0
+                                    }
+                                }()
+                                let bottomSamples: [Float] = {
+                                    switch routing {
+                                    case .stereo:    return wf.rightSamples
+                                    case .monoLeft:  return []
+                                    case .monoRight: return wf.monoSumSamples
+                                    }
+                                }()
+                                let bottomGain: Float = {
+                                    switch routing {
+                                    case .stereo, .monoRight: return masterVolume * rightVolume
+                                    case .monoLeft:           return 0
+                                    }
+                                }()
+                                let topColor: Color  = (routing == .monoLeft)  ? .green : .blue
+                                let botColor: Color  = (routing == .monoRight) ? .green : .orange
 
-                                StereoWaveformShape(
-                                    samples: wf.rightSamples,
-                                    gain: masterVolume * rightVolume,
-                                    flipped: true
-                                )
-                                .fill(Color.orange.opacity(0.6))
+                                StereoWaveformShape(samples: topSamples,    gain: topGain,    flipped: false)
+                                    .fill(topColor.opacity(0.6))
+                                StereoWaveformShape(samples: bottomSamples, gain: bottomGain, flipped: true)
+                                    .fill(botColor.opacity(0.6))
 
                                 Rectangle()
                                     .fill(Color.secondary.opacity(0.3))

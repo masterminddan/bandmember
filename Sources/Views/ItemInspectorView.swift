@@ -93,10 +93,84 @@ struct ItemInspectorView: View {
                     }
                 }
 
+                Divider()
+
+                // Output routing (applies to all selected)
+                let common = multiSelectOutputRouting
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Output").font(.headline)
+                    Menu {
+                        ForEach(OutputRouting.allCases, id: \.self) { mode in
+                            Button(action: {
+                                store.pushUndo()
+                                applyToSelection { $0.outputRouting = mode }
+                            }) {
+                                if common == mode {
+                                    Label(mode.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(mode.displayName)
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            Text(common?.displayName ?? "Mixed")
+                                .foregroundColor(common == nil ? .secondary : .primary)
+                                .italic(common == nil)
+                            Spacer()
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(Color.secondary.opacity(0.1))
+                        )
+                    }
+                    .menuStyle(.borderlessButton)
+                    if let c = common, c != .stereo {
+                        Text("L+R are summed (-3 dB) and sent to a single channel.")
+                            .font(.caption2).foregroundColor(.secondary)
+                    }
+                }
+
+                Divider()
+
+                // Volume (applies to all selected)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Volume").font(.headline)
+                    multiVolumeSlider(label: "Master", keyPath: \.masterVolume)
+                    multiVolumeSlider(label: "Left",   keyPath: \.leftVolume)
+                    multiVolumeSlider(label: "Right",  keyPath: \.rightVolume)
+                }
+
                 Spacer()
             }
             .padding()
         }
+    }
+
+    /// Builds a VolumeSlider that reads the common value across the selection
+    /// (or shows "Mixed"), and on edit applies the new value to every selected item.
+    @ViewBuilder
+    private func multiVolumeSlider(
+        label: String,
+        keyPath: WritableKeyPath<PlaylistItem, Float>
+    ) -> some View {
+        let common = multiSelectVolume(keyPath)
+        VolumeSlider(
+            label: label,
+            value: Binding(
+                get: { common ?? 1.0 },
+                set: { newVal in
+                    applyToSelection { $0[keyPath: keyPath] = newVal }
+                }
+            ),
+            onEditStart: { store.pushUndo() },
+            mixedLabel: common == nil ? "Mixed" : nil
+        )
     }
 
     /// Returns the common color tag if all selected items share one, otherwise .none
@@ -111,6 +185,30 @@ struct ItemInspectorView: View {
     private var multiSelectAutoFollow: Bool {
         store.selectedIDs.allSatisfy { id in
             store.items.first { $0.id == id }?.autoFollow ?? false
+        }
+    }
+
+    /// Returns the common output routing if all selected items share one, otherwise nil.
+    private var multiSelectOutputRouting: OutputRouting? {
+        let routings = Set(store.selectedIDs.compactMap { id in
+            store.items.first { $0.id == id }?.outputRouting
+        })
+        return routings.count == 1 ? routings.first : nil
+    }
+
+    private func multiSelectVolume(_ keyPath: KeyPath<PlaylistItem, Float>) -> Float? {
+        let vals = Set(store.selectedIDs.compactMap { id in
+            store.items.first { $0.id == id }?[keyPath: keyPath]
+        })
+        return vals.count == 1 ? vals.first : nil
+    }
+
+    private func applyToSelection(_ mutate: (inout PlaylistItem) -> Void) {
+        for id in store.selectedIDs {
+            if let idx = store.items.firstIndex(where: { $0.id == id }) {
+                mutate(&store.items[idx])
+                playbackEngine.updateVolume(for: store.items[idx])
+            }
         }
     }
 
@@ -342,6 +440,31 @@ struct ItemInspectorView: View {
 
                 Divider()
 
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Output").font(.headline)
+                    Picker("Output", selection: Binding(
+                        get: { store.items[safe: index]?.outputRouting ?? .stereo },
+                        set: { newValue in
+                            guard index < store.items.count else { return }
+                            store.pushUndo()
+                            store.items[index].outputRouting = newValue
+                            playbackEngine.updateVolume(for: store.items[index])
+                        }
+                    )) {
+                        ForEach(OutputRouting.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    if (store.items[safe: index]?.outputRouting ?? .stereo) != .stereo {
+                        Text("L+R are summed (-3 dB) and sent to a single channel. Use this when one interface output feeds IEMs and the other feeds FOH.")
+                            .font(.caption2).foregroundColor(.secondary)
+                    }
+                }
+
+                Divider()
+
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Volume").font(.headline)
                     VolumeSlider(label: "Master", value: Binding(
@@ -447,6 +570,10 @@ struct VolumeSlider: View {
     @Binding var value: Float
     var maxValue: Float = 2.0
     var onEditStart: (() -> Void)? = nil
+    /// When non-nil, replaces the right-hand percentage label and renders
+    /// the slider in a "neutral" appearance — used in multi-select to mean
+    /// "selected items have different values; touching this will set them all".
+    var mixedLabel: String? = nil
 
     var body: some View {
         HStack(spacing: 8) {
@@ -456,10 +583,19 @@ struct VolumeSlider: View {
             Slider(value: $value, in: 0...maxValue) { editing in
                 if editing { onEditStart?() }
             }
-            Text(String(format: "%.0f%%", value * 100))
-                .frame(width: 44, alignment: .trailing)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(value > 1.0 ? .orange : .secondary)
+            .opacity(mixedLabel != nil ? 0.5 : 1.0)
+            if let mixed = mixedLabel {
+                Text(mixed)
+                    .frame(width: 44, alignment: .trailing)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.secondary.opacity(0.7))
+                    .italic()
+            } else {
+                Text(String(format: "%.0f%%", value * 100))
+                    .frame(width: 44, alignment: .trailing)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(value > 1.0 ? .orange : .secondary)
+            }
         }
     }
 }

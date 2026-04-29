@@ -26,6 +26,38 @@ enum MediaType: String, Codable, CaseIterable {
     }
 }
 
+/// How a cue's stereo audio is routed to the device's output channels.
+/// - stereo: pass L→L and R→R (default).
+/// - monoLeft: sum L+R to a mono signal on the LEFT channel only (RIGHT muted).
+/// - monoRight: sum L+R to a mono signal on the RIGHT channel only (LEFT muted).
+///
+/// `monoLeft` / `monoRight` are intended for live rigs that physically split a
+/// 2-channel interface into two destinations (e.g. L → IEMs, R → PA). Summing
+/// L+R preserves all musical content rather than discarding one side of the
+/// stereo file.
+enum OutputRouting: String, Codable, CaseIterable {
+    case stereo
+    case monoLeft
+    case monoRight
+
+    var displayName: String {
+        switch self {
+        case .stereo:    return "Stereo (L+R)"
+        case .monoLeft:  return "Mono → Left"
+        case .monoRight: return "Mono → Right"
+        }
+    }
+
+    /// Integer value passed into ChannelGainAU. Must stay in sync with the AU.
+    var auMode: Int32 {
+        switch self {
+        case .stereo:    return 0
+        case .monoLeft:  return 1
+        case .monoRight: return 2
+        }
+    }
+}
+
 /// Predefined color tags for playlist items.
 enum ColorTag: String, Codable, CaseIterable {
     case none
@@ -50,6 +82,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
     var leftVolume: Float = 1.0
     var rightVolume: Float = 1.0
     var colorTag: ColorTag = .none
+    var outputRouting: OutputRouting = .stereo
     /// When true, a fullscreen lyrics presenter opens on `targetDisplayIndex`
     /// when this item is triggered, showing timed lyrics from any track in
     /// the auto-follow chain.
@@ -65,7 +98,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
     /// Exclude session-only positions from serialization.
     enum CodingKeys: String, CodingKey {
         case id, name, filePath, mediaType, targetDisplayIndex, autoFollow
-        case masterVolume, leftVolume, rightVolume, colorTag, showLyrics
+        case masterVolume, leftVolume, rightVolume, colorTag, outputRouting, showLyrics
     }
 
     var fileURL: URL {
@@ -104,6 +137,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
             && lhs.leftVolume == rhs.leftVolume
             && lhs.rightVolume == rhs.rightVolume
             && lhs.colorTag == rhs.colorTag
+            && lhs.outputRouting == rhs.outputRouting
             && lhs.showLyrics == rhs.showLyrics
     }
 
@@ -124,6 +158,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         leftVolume = try c.decodeIfPresent(Float.self, forKey: .leftVolume) ?? 1.0
         rightVolume = try c.decodeIfPresent(Float.self, forKey: .rightVolume) ?? 1.0
         colorTag = try c.decodeIfPresent(ColorTag.self, forKey: .colorTag) ?? .none
+        outputRouting = try c.decodeIfPresent(OutputRouting.self, forKey: .outputRouting) ?? .stereo
         showLyrics = try c.decodeIfPresent(Bool.self, forKey: .showLyrics) ?? false
         startPosition = 0.0  // session-only, always starts at 0
         endPosition = nil    // session-only
