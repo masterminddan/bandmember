@@ -121,26 +121,6 @@ struct WaveformView: View {
     private var duration: Double { waveform?.duration ?? 0 }
     private var isPlaying: Bool { store.playingItemIDs.contains(itemID) }
 
-    /// Visualization mode for this cue's bus.
-    /// - `stereo`:    L on top, R on bottom (normal stereo pair).
-    /// - `monoLeft`:  mono-sum on top half, bottom muted (sum lands on the
-    ///                "L side" of a stereo pair — odd-numbered output).
-    /// - `monoRight`: mono-sum on bottom half, top muted (sum lands on the
-    ///                "R side" — even-numbered output).
-    private enum WaveformMode { case stereo, monoLeft, monoRight }
-    private var mode: WaveformMode {
-        guard let item = store.items.first(where: { $0.id == itemID }) else { return .stereo }
-        let busID = item.outputRouting.busID
-        guard let uid = AudioOutputManager.shared.currentDevice?.uid,
-              let asn = OutputBusStore.shared.assignment(busID: busID, deviceUID: uid) else {
-            return .stereo
-        }
-        switch asn {
-        case .stereo:         return .stereo
-        case .monoSum(let c): return c.isMultiple(of: 2) ? .monoRight : .monoLeft
-        }
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Waveform").font(.caption).foregroundColor(.secondary)
@@ -150,11 +130,11 @@ struct WaveformView: View {
                 VStack(spacing: 0) {
                     Text("L")
                         .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(mode == .monoRight ? .secondary.opacity(0.4) : .blue)
+                        .foregroundColor(.blue)
                         .frame(maxHeight: .infinity)
                     Text("R")
                         .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(mode == .monoLeft ? .secondary.opacity(0.4) : .orange)
+                        .foregroundColor(.orange)
                         .frame(maxHeight: .infinity)
                 }
                 .frame(width: 12)
@@ -180,37 +160,19 @@ struct WaveformView: View {
                                 // Top half = LEFT output channel, bottom half = RIGHT output channel.
                                 // In mono modes, the active side draws the pre-summed L+R waveform
                                 // and the muted side draws nothing — matching what the AU sends.
-                                // Stereo:    top = L,        bottom = R
-                                // monoLeft:  top = L+R sum,  bottom = muted   (sum lands on odd ch)
-                                // monoRight: top = muted,    bottom = L+R sum (sum lands on even ch)
-                                let topSamples: [Float] = {
-                                    switch mode {
-                                    case .stereo:    return wf.leftSamples
-                                    case .monoLeft:  return wf.monoSumSamples
-                                    case .monoRight: return []
-                                    }
-                                }()
-                                let topGain: Float = {
-                                    switch mode {
-                                    case .stereo, .monoLeft: return masterVolume * leftVolume
-                                    case .monoRight:         return 0
-                                    }
-                                }()
-                                let bottomSamples: [Float] = {
-                                    switch mode {
-                                    case .stereo:    return wf.rightSamples
-                                    case .monoLeft:  return []
-                                    case .monoRight: return wf.monoSumSamples
-                                    }
-                                }()
-                                let bottomGain: Float = {
-                                    switch mode {
-                                    case .stereo, .monoRight: return masterVolume * rightVolume
-                                    case .monoLeft:           return 0
-                                    }
-                                }()
-                                let topColor: Color  = (mode == .monoLeft)  ? .green : .blue
-                                let botColor: Color  = (mode == .monoRight) ? .green : .orange
+                                // The waveform reflects what's in the FILE,
+                                // scaled by the cue's master / L / R volume.
+                                // It is intentionally independent of output
+                                // routing — the same file plays out of any
+                                // bus, and stereo-vs-mono-sum placement is
+                                // a per-device decision that doesn't change
+                                // what the cue itself contains.
+                                let topSamples    = wf.leftSamples
+                                let topGain       = masterVolume * leftVolume
+                                let bottomSamples = wf.rightSamples
+                                let bottomGain    = masterVolume * rightVolume
+                                let topColor: Color = .blue
+                                let botColor: Color = .orange
 
                                 StereoWaveformShape(samples: topSamples,    gain: topGain,    flipped: false)
                                     .fill(topColor.opacity(0.6))

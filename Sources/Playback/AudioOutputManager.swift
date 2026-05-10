@@ -113,6 +113,32 @@ final class AudioOutputManager: ObservableObject {
                                             channelCount: dev.channelCount)
     }
 
+    /// Nominal sample rate the device is currently running at (Hz). Queried
+    /// directly from CoreAudio rather than via `AVAudioEngine.outputNode`,
+    /// which can return stale info immediately after a device swap and
+    /// cause the engine to render at the wrong rate (slow/low-pitch playback).
+    func nominalSampleRate(of deviceID: AudioObjectID) -> Double {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var rate: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        let status = AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &rate)
+        return status == noErr ? Double(rate) : 0
+    }
+
+    /// Nominal sample rate of the currently selected output device,
+    /// falling back to 48 kHz when unknown.
+    var currentSampleRate: Double {
+        if let dev = currentDevice {
+            let rate = nominalSampleRate(of: dev.id)
+            if rate > 0 { return rate }
+        }
+        return 48000
+    }
+
     // MARK: - CoreAudio helpers
 
     private func systemDefaultDevice() -> AudioOutputDevice? {

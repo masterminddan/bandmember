@@ -133,10 +133,18 @@ class PlaybackEngine: ObservableObject {
         let output    = audioEngine.outputNode
 
         // Format we want to drive the device with. Float32, non-interleaved,
-        // N channels matching the device.
-        let sampleRate = output.outputFormat(forBus: 0).sampleRate
+        // N channels matching the device, at the device's nominal sample
+        // rate. Reading the rate from CoreAudio directly avoids a slow /
+        // low-pitched playback bug on devices whose rate differs from the
+        // stale value AVAudioEngine reports immediately after a device swap.
+        var sampleRate = AudioOutputManager.shared.currentSampleRate
+        if sampleRate <= 0 {
+            let nodeRate = output.outputFormat(forBus: 0).sampleRate
+            sampleRate = nodeRate > 0 ? nodeRate : 48000
+        }
+        debugLog("[ENGINE] Limiter chain at \(sampleRate) Hz × \(currentChannelCount) ch")
         let multiFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                     sampleRate: sampleRate > 0 ? sampleRate : 48000,
+                                     sampleRate: sampleRate,
                                      channels: AVAudioChannelCount(currentChannelCount),
                                      interleaved: false)
 

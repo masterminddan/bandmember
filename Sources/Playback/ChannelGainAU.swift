@@ -112,6 +112,13 @@ class ChannelGainAU: AUAudioUnit {
         _outputBusArray = AUAudioUnitBusArray(audioUnit: self, busType: .output, busses: [outBus])
 
         maximumFramesToRender = 4096
+
+        // Pre-allocate the 2-channel pull buffer now (rather than in
+        // `allocateRenderResources`) so it's available before the host
+        // reads `internalRenderBlock`. The render closure captures these
+        // pointers by value, and if they were still nil at capture time
+        // every render call would short-circuit to silence.
+        allocatePullBuffer()
     }
 
     deinit {
@@ -152,7 +159,17 @@ class ChannelGainAU: AUAudioUnit {
 
     override func allocateRenderResources() throws {
         try super.allocateRenderResources()
-        deallocatePullBuffer()
+        // Pull buffer is allocated once in init() and lives until deinit,
+        // so the render closure can safely capture its pointers without
+        // a chicken-and-egg ordering problem between this method and the
+        // host's read of `internalRenderBlock`.
+    }
+
+    override func deallocateRenderResources() {
+        super.deallocateRenderResources()
+    }
+
+    private func allocatePullBuffer() {
         let frames = Int(maximumFramesToRender)
         let bytes  = frames * MemoryLayout<Float>.size
 
@@ -179,11 +196,6 @@ class ChannelGainAU: AUAudioUnit {
         self.pullBufferList = abl
         self.pullBufferL = lPtr
         self.pullBufferR = rPtr
-    }
-
-    override func deallocateRenderResources() {
-        deallocatePullBuffer()
-        super.deallocateRenderResources()
     }
 
     private func deallocatePullBuffer() {
