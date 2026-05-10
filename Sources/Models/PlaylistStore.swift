@@ -4,6 +4,13 @@ import Combine
 private let kLastPlaylistPath = "lastPlaylistPath"
 private let kLastSelectedItemIDs = "lastSelectedItemIDs"
 
+extension Notification.Name {
+    /// Fired by `PlaylistStore.load` after it finishes installing newly
+    /// loaded items. Listeners can use this to run post-load checks
+    /// (e.g. validating that referenced output buses exist).
+    static let playlistDidLoad = Notification.Name("BandMember.playlistDidLoad")
+}
+
 class PlaylistStore: ObservableObject {
     @Published var items: [PlaylistItem] = []
     @Published var selectedIDs: Set<UUID> = []
@@ -163,6 +170,9 @@ class PlaylistStore: ObservableObject {
         playingItemIDs = []
         currentFilePath = url
         UserDefaults.standard.set(url.path, forKey: kLastPlaylistPath)
+        // Notify listeners (e.g. BandMemberApp) so they can surface bus
+        // sanity warnings now that we have new items to inspect.
+        NotificationCenter.default.post(name: .playlistDidLoad, object: self)
     }
 
     func restoreLastSession() {

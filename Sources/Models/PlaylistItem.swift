@@ -26,35 +26,48 @@ enum MediaType: String, Codable, CaseIterable {
     }
 }
 
-/// How a cue's stereo audio is routed to the device's output channels.
-/// - stereo: pass L→L and R→R (default).
-/// - monoLeft: sum L+R to a mono signal on the LEFT channel only (RIGHT muted).
-/// - monoRight: sum L+R to a mono signal on the RIGHT channel only (LEFT muted).
+/// Per-cue output routing. Points at a named `OutputBus`; the bus-to-channel
+/// translation is done at play time using the active device's `DeviceMapping`.
 ///
-/// `monoLeft` / `monoRight` are intended for live rigs that physically split a
-/// 2-channel interface into two destinations (e.g. L → IEMs, R → PA). Summing
-/// L+R preserves all musical content rather than discarding one side of the
-/// stereo file.
-enum OutputRouting: String, Codable, CaseIterable {
-    case stereo
-    case monoLeft
-    case monoRight
+/// Cues no longer encode physical channels or device identity directly —
+/// changing rigs only requires re-mapping buses on the new device, not
+/// editing every cue.
+struct OutputRouting: Codable, Hashable {
+    var busID: UUID
 
-    var displayName: String {
-        switch self {
-        case .stereo:    return "Stereo (L+R)"
-        case .monoLeft:  return "Mono → Left"
-        case .monoRight: return "Mono → Right"
-        }
+    /// New playlists default to the Main bus. Older playlists migrate via
+    /// `init(from:)`, which also handles the legacy string-enum form.
+    static var defaultRouting: OutputRouting {
+        OutputRouting(busID: OutputBusStore.shared.mainBusID)
     }
 
-    /// Integer value passed into ChannelGainAU. Must stay in sync with the AU.
-    var auMode: Int32 {
-        switch self {
-        case .stereo:    return 0
-        case .monoLeft:  return 1
-        case .monoRight: return 2
+    enum CodingKeys: String, CodingKey { case busID }
+
+    init(busID: UUID) {
+        self.busID = busID
+    }
+
+    init(from decoder: Decoder) throws {
+        // New format: { "busID": "<uuid>" }
+        if let c = try? decoder.container(keyedBy: CodingKeys.self),
+           let id = try? c.decode(UUID.self, forKey: .busID) {
+            self.busID = id
+            return
         }
+        // Legacy format: a single JSON string ("stereo" / "monoLeft" / "monoRight").
+        if let svc = try? decoder.singleValueContainer(),
+           let raw = try? svc.decode(String.self) {
+            switch raw {
+            case "monoLeft":
+                self.busID = OutputBusStore.shared.legacyMonoLeftBusID()
+            case "monoRight":
+                self.busID = OutputBusStore.shared.legacyMonoRightBusID()
+            default:
+                self.busID = OutputBusStore.shared.mainBusID
+            }
+            return
+        }
+        self.busID = OutputBusStore.shared.mainBusID
     }
 }
 
@@ -82,7 +95,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
     var leftVolume: Float = 1.0
     var rightVolume: Float = 1.0
     var colorTag: ColorTag = .none
-    var outputRouting: OutputRouting = .stereo
+    var outputRouting: OutputRouting = .defaultRouting
     /// When true, a fullscreen lyrics presenter opens on `targetDisplayIndex`
     /// when this item is triggered, showing timed lyrics from any track in
     /// the auto-follow chain.
@@ -158,7 +171,8 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         leftVolume = try c.decodeIfPresent(Float.self, forKey: .leftVolume) ?? 1.0
         rightVolume = try c.decodeIfPresent(Float.self, forKey: .rightVolume) ?? 1.0
         colorTag = try c.decodeIfPresent(ColorTag.self, forKey: .colorTag) ?? .none
-        outputRouting = try c.decodeIfPresent(OutputRouting.self, forKey: .outputRouting) ?? .stereo
+        outputRouting = try c.decodeIfPresent(OutputRouting.self, forKey: .outputRouting)
+            ?? .defaultRouting
         showLyrics = try c.decodeIfPresent(Bool.self, forKey: .showLyrics) ?? false
         startPosition = 0.0  // session-only, always starts at 0
         endPosition = nil    // session-only

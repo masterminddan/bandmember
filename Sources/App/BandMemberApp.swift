@@ -5,6 +5,9 @@ struct BandMemberApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = PlaylistStore()
     @StateObject private var playbackEngine = PlaybackEngine()
+    @ObservedObject private var audioOut = AudioOutputManager.shared
+    @ObservedObject private var busStore = OutputBusStore.shared
+    @State private var showMappingEditor = false
     @AppStorage("darkMode") private var darkMode = true
 
     var body: some Scene {
@@ -17,6 +20,14 @@ struct BandMemberApp: App {
                     appDelegate.store = store
                     TempoCoordinator.shared.attach(to: store)
                     store.restoreLastSession()
+                    warnAboutMissingBuses()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .playlistDidLoad)) { _ in
+                    warnAboutMissingBuses()
+                }
+                .sheet(isPresented: $showMappingEditor) {
+                    OutputMappingEditor()
+                        .frame(minWidth: 620, minHeight: 420)
                 }
                 .preferredColorScheme(darkMode ? .dark : .light)
         }
@@ -71,6 +82,77 @@ struct BandMemberApp: App {
                 }
                 .keyboardShortcut(.escape, modifiers: [])
             }
+
+            CommandMenu("Audio") {
+                Menu("Output Device") {
+                    // "System Default" gets a checkmark only when the user
+                    // hasn't pinned a specific device.
+                    Button(action: { audioOut.currentUID = nil }) {
+                        if audioOut.currentUID == nil {
+                            Label("System Default", systemImage: "checkmark")
+                        } else {
+                            Text("System Default")
+                        }
+                    }
+                    Divider()
+                    // Every device gets a checkmark when it's the *resolved*
+                    // current device — so "System Default" mode still shows
+                    // you which physical box is actually receiving audio.
+                    let resolvedUID = audioOut.currentDevice?.uid
+                    ForEach(audioOut.devices) { dev in
+                        Button(action: { audioOut.currentUID = dev.uid }) {
+                            let label = "\(dev.name) — \(dev.channelCount) ch"
+                            if dev.uid == resolvedUID {
+                                Label(label, systemImage: "checkmark")
+                            } else {
+                                Text(label)
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button("Edit Output Mappings…") {
+                    showMappingEditor = true
+                }
+                .keyboardShortcut("m", modifiers: [.command, .option])
+            }
+        }
+    }
+
+    /// Scans the just-loaded playlist for cues whose bus has gone missing
+    /// (e.g. the playlist came from another machine, or the user deleted
+    /// the bus). Surfaces an alert summarizing how many cues are affected
+    /// and offers to remap them to Main, or leave them alone for manual
+    /// fix-up via the mapping editor.
+    private func warnAboutMissingBuses() {
+        let known = Set(busStore.buses.map { $0.id })
+        let missing = store.items.filter {
+            !$0.isDivider && !known.contains($0.outputRouting.busID)
+        }
+        guard !missing.isEmpty else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Output bus missing"
+        alert.informativeText = """
+            \(missing.count) cue\(missing.count == 1 ? "" : "s") route to a bus that is not defined on this machine. Until you fix this, those cues will play to the Main bus.
+            """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Reroute to Main")
+        alert.addButton(withTitle: "Leave as-is")
+        alert.addButton(withTitle: "Edit Mappings…")
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            store.pushUndo()
+            for item in missing {
+                if let idx = store.items.firstIndex(where: { $0.id == item.id }) {
+                    store.items[idx].outputRouting = OutputRouting(busID: busStore.mainBusID)
+                }
+            }
+        case .alertThirdButtonReturn:
+            showMappingEditor = true
+        default:
+            break  // leave as-is; engine still falls back to ch 1 stereo
         }
     }
 

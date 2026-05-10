@@ -5,6 +5,9 @@ struct ItemInspectorView: View {
     @EnvironmentObject var store: PlaylistStore
     @EnvironmentObject var playbackEngine: PlaybackEngine
     @ObservedObject private var tempo = TempoCoordinator.shared
+    @ObservedObject private var busStore = OutputBusStore.shared
+    @ObservedObject private var audioOut = AudioOutputManager.shared
+    @State private var showMappingEditor = false
     @AppStorage("snapMode") private var snapModeRaw: String = SnapMode.measure.rawValue
     @AppStorage("inspectorTab") private var inspectorTabRaw: String = "track"
 
@@ -20,13 +23,19 @@ struct ItemInspectorView: View {
     }
 
     var body: some View {
-        if store.selectedIDs.count > 1 {
-            multiSelectInspector
-        } else if let selectedID = store.selectedIDs.first,
-                  let itemIndex = store.items.firstIndex(where: { $0.id == selectedID }) {
-            inspectorContent(for: itemIndex, id: selectedID)
-        } else {
-            emptyState
+        Group {
+            if store.selectedIDs.count > 1 {
+                multiSelectInspector
+            } else if let selectedID = store.selectedIDs.first,
+                      let itemIndex = store.items.firstIndex(where: { $0.id == selectedID }) {
+                inspectorContent(for: itemIndex, id: selectedID)
+            } else {
+                emptyState
+            }
+        }
+        .sheet(isPresented: $showMappingEditor) {
+            OutputMappingEditor()
+                .frame(minWidth: 620, minHeight: 420)
         }
     }
 
@@ -95,43 +104,22 @@ struct ItemInspectorView: View {
 
                 Divider()
 
-                // Output routing (applies to all selected)
-                let common = multiSelectOutputRouting
+                // Output bus (applies to all selected)
+                let commonBusID = multiSelectBusID
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Output").font(.headline)
-                    Menu {
-                        ForEach(OutputRouting.allCases, id: \.self) { mode in
-                            Button(action: {
-                                store.pushUndo()
-                                applyToSelection { $0.outputRouting = mode }
-                            }) {
-                                if common == mode {
-                                    Label(mode.displayName, systemImage: "checkmark")
-                                } else {
-                                    Text(mode.displayName)
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack {
-                            Text(common?.displayName ?? "Mixed")
-                                .foregroundColor(common == nil ? .secondary : .primary)
-                                .italic(common == nil)
-                            Spacer()
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(Color.secondary.opacity(0.1))
-                        )
-                    }
-                    .menuStyle(.borderlessButton)
-                    if let c = common, c != .stereo {
-                        Text("L+R are summed (-3 dB) and sent to a single channel.")
+                    GlobalOutputDevicePicker()
+                    BusPicker(
+                        currentBusID: commonBusID,
+                        onSelect: { newBusID in
+                            store.pushUndo()
+                            applyToSelection { $0.outputRouting = OutputRouting(busID: newBusID) }
+                        },
+                        onEdit: { showMappingEditor = true },
+                        mixedLabel: commonBusID == nil ? "Mixed" : nil
+                    )
+                    if let id = commonBusID, isMonoSumOnCurrentDevice(busID: id) {
+                        Text("L+R are summed (-3 dB) and sent to a single channel on this device.")
                             .font(.caption2).foregroundColor(.secondary)
                     }
                 }
@@ -188,12 +176,21 @@ struct ItemInspectorView: View {
         }
     }
 
-    /// Returns the common output routing if all selected items share one, otherwise nil.
-    private var multiSelectOutputRouting: OutputRouting? {
-        let routings = Set(store.selectedIDs.compactMap { id in
-            store.items.first { $0.id == id }?.outputRouting
+    /// True if `busID` is configured as mono-sum on the currently active
+    /// output device. Used to show the "L+R are summed" caption under the
+    /// Output picker — the routing shape is per-device now, not per-bus.
+    private func isMonoSumOnCurrentDevice(busID: UUID) -> Bool {
+        guard let uid = audioOut.currentDevice?.uid,
+              let asn = busStore.assignment(busID: busID, deviceUID: uid) else { return false }
+        return asn.isMonoSum
+    }
+
+    /// Returns the common output bus ID if all selected items share one, otherwise nil.
+    private var multiSelectBusID: UUID? {
+        let ids = Set(store.selectedIDs.compactMap { id in
+            store.items.first { $0.id == id }?.outputRouting.busID
         })
-        return routings.count == 1 ? routings.first : nil
+        return ids.count == 1 ? ids.first : nil
     }
 
     private func multiSelectVolume(_ keyPath: KeyPath<PlaylistItem, Float>) -> Float? {
@@ -442,23 +439,20 @@ struct ItemInspectorView: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Output").font(.headline)
-                    Picker("Output", selection: Binding(
-                        get: { store.items[safe: index]?.outputRouting ?? .stereo },
-                        set: { newValue in
+                    GlobalOutputDevicePicker()
+                    let currentBusID = store.items[safe: index]?.outputRouting.busID
+                    BusPicker(
+                        currentBusID: currentBusID,
+                        onSelect: { newBusID in
                             guard index < store.items.count else { return }
                             store.pushUndo()
-                            store.items[index].outputRouting = newValue
+                            store.items[index].outputRouting = OutputRouting(busID: newBusID)
                             playbackEngine.updateVolume(for: store.items[index])
-                        }
-                    )) {
-                        ForEach(OutputRouting.allCases, id: \.self) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    if (store.items[safe: index]?.outputRouting ?? .stereo) != .stereo {
-                        Text("L+R are summed (-3 dB) and sent to a single channel. Use this when one interface output feeds IEMs and the other feeds FOH.")
+                        },
+                        onEdit: { showMappingEditor = true }
+                    )
+                    if let id = currentBusID, isMonoSumOnCurrentDevice(busID: id) {
+                        Text("L+R are summed (-3 dB) and sent to a single channel on this device. Use this when one interface output feeds IEMs and the other feeds FOH.")
                             .font(.caption2).foregroundColor(.secondary)
                     }
                 }
@@ -653,6 +647,156 @@ class FileDropNSView: NSView {
     private func valid(_ i: NSDraggingInfo) -> URL? {
         guard let urls = i.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], let u = urls.first else { return nil }
         return Self.exts.contains(u.pathExtension.lowercased()) ? u : nil
+    }
+}
+
+// MARK: - Device Picker
+
+/// Compact dropdown for the global output device. Mirrors the Audio menu's
+/// device picker so the user can switch rigs from the Inspector without
+/// leaving the track tab. Selection is global, not per-cue — every cue
+/// follows whichever device this picks.
+struct GlobalOutputDevicePicker: View {
+    @ObservedObject private var audioOut = AudioOutputManager.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Device").font(.caption).foregroundColor(.secondary)
+            Menu {
+                Button(action: { audioOut.currentUID = nil }) {
+                    if audioOut.currentUID == nil {
+                        Label("System Default", systemImage: "checkmark")
+                    } else {
+                        Text("System Default")
+                    }
+                }
+                Divider()
+                let resolvedUID = audioOut.currentDevice?.uid
+                ForEach(audioOut.devices) { dev in
+                    Button(action: { audioOut.currentUID = dev.uid }) {
+                        let label = "\(dev.name) — \(dev.channelCount) ch"
+                        if dev.uid == resolvedUID {
+                            Label(label, systemImage: "checkmark")
+                        } else {
+                            Text(label)
+                        }
+                    }
+                }
+            } label: {
+                HStack {
+                    Text(closedLabel)
+                        .lineLimit(1).truncationMode(.tail)
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2).foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.secondary.opacity(0.1))
+                )
+            }
+            .menuStyle(.borderlessButton)
+        }
+    }
+
+    /// Closed-state label is always the *resolved* device name plus a
+    /// "(default)" suffix when the user is on System Default — helpful
+    /// when configuring a rig you'll plug in later.
+    private var closedLabel: String {
+        if let dev = audioOut.currentDevice {
+            let suffix = audioOut.currentUID == nil ? " (default)" : ""
+            return "\(dev.name) — \(dev.channelCount) ch\(suffix)"
+        }
+        return audioOut.currentUID == nil ? "System Default" : "—"
+    }
+}
+
+// MARK: - Bus Picker
+
+/// Per-cue output routing dropdown. Shows each named bus alongside the
+/// physical channel(s) it occupies on the currently selected device, plus
+/// a small gear button that opens the mapping editor sheet directly.
+struct BusPicker: View {
+    /// The bus the cue (or selection) currently routes to. Pass nil to render
+    /// the closed dropdown in a "Mixed" state for multi-select.
+    var currentBusID: UUID?
+    /// Called when the user picks a bus from the menu.
+    var onSelect: (UUID) -> Void
+    /// Called when the user clicks the gear button or the menu's "Edit
+    /// Mappings…" item.
+    var onEdit: () -> Void
+    /// When non-nil, replaces the closed-state label and renders it in
+    /// secondary/italic style — used by the multi-select inspector.
+    var mixedLabel: String? = nil
+
+    @ObservedObject private var busStore = OutputBusStore.shared
+    @ObservedObject private var audioOut = AudioOutputManager.shared
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Menu {
+                ForEach(busStore.buses) { bus in
+                    Button(action: { onSelect(bus.id) }) {
+                        let label = "\(bus.name) — \(channelLabel(for: bus.id))"
+                        if currentBusID == bus.id {
+                            Label(label, systemImage: "checkmark")
+                        } else {
+                            Text(label)
+                        }
+                    }
+                }
+                Divider()
+                Button("Edit Mappings…") { onEdit() }
+            } label: {
+                HStack {
+                    closedLabelView
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.secondary.opacity(0.1))
+                )
+            }
+            .menuStyle(.borderlessButton)
+
+            Button(action: onEdit) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 13))
+            }
+            .buttonStyle(.borderless)
+            .help("Edit output mappings")
+        }
+    }
+
+    @ViewBuilder
+    private var closedLabelView: some View {
+        if let mixed = mixedLabel {
+            Text(mixed).foregroundColor(.secondary).italic()
+        } else if let id = currentBusID, let bus = busStore.bus(id: id) {
+            let chan = channelLabel(for: id)
+            let unmapped = chan == "Not mapped" || chan == "Out of range"
+            Text("\(bus.name) — \(chan)")
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundColor(unmapped ? .orange : .primary)
+        } else {
+            Text("Unknown bus").foregroundColor(.orange).italic()
+        }
+    }
+
+    private func channelLabel(for busID: UUID) -> String {
+        busStore.channelLabel(
+            busID: busID,
+            deviceUID: audioOut.currentDevice?.uid,
+            deviceChannelCount: audioOut.currentChannelCount
+        )
     }
 }
 

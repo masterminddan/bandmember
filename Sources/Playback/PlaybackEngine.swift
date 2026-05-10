@@ -1,6 +1,8 @@
 import AVFoundation
 import AppKit
+import AudioToolbox
 import Combine
+import CoreAudio
 import CoreMedia
 
 /// Manages playback using AVAudioEngine for sample-accurate sync of audio files,
@@ -30,6 +32,16 @@ class PlaybackEngine: ObservableObject {
     /// unreliable across engine stop/restart cycles.
     private var audioPlayStartDates: [UUID: Date] = [:]
 
+    /// Number of output channels currently being driven (matches the
+    /// CoreAudio device chosen via `AudioOutputManager`). Used to format
+    /// the multi-channel mainMixer ↔ limiter ↔ outputNode connection chain
+    /// and to size each cue's `ChannelGainAU` output.
+    private var currentChannelCount: Int = 2
+
+    /// Subscription that watches the user's chosen output device and swaps
+    /// it on the engine when it changes.
+    private var deviceCancellable: AnyCancellable?
+
     // ── Video (still uses AVPlayer per-cue) ──────────────────────────
     private var videoPlayers: [UUID: AVPlayer] = [:]
     private var videoWindows: [UUID: NSWindow] = [:]
@@ -47,14 +59,68 @@ class PlaybackEngine: ObservableObject {
             name: "BandMember Channel Gain",
             version: 1
         )
+        applySelectedOutputDevice()
+        installOutputLimiter()
+
+        // Watch the user's device choice. Switching devices requires fully
+        // tearing down the engine — we stop everything, swap, and let the
+        // next play() rebuild cue graphs at the new channel count.
+        deviceCancellable = AudioOutputManager.shared.$currentUID
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.handleDeviceChange() }
+    }
+
+    private func handleDeviceChange() {
+        stopAll()
+        applySelectedOutputDevice()
         installOutputLimiter()
     }
 
-    /// Inserts an Apple PeakLimiter between mainMixerNode and outputNode so the
-    /// final stereo bus is brick-walled at ~0 dBFS. AVAudioEngine implicitly
+    /// Pushes the user's currently selected device down to the engine's
+    /// output AudioUnit. Safe to call repeatedly; defers to system default
+    /// when no choice is set or the chosen device is missing.
+    private func applySelectedOutputDevice() {
+        let mgr = AudioOutputManager.shared
+        let device = mgr.currentDevice
+        currentChannelCount = max(1, device?.channelCount ?? 2)
+
+        // If we don't have an explicit device or its CoreAudio ID isn't
+        // currently visible, fall back to system default — AVAudioEngine
+        // already does this on its own; just make sure we reflect channels.
+        guard let dev = device,
+              let outputAU = audioEngine.outputNode.audioUnit else { return }
+
+        var deviceID: AudioDeviceID = dev.id
+        let status = AudioUnitSetProperty(
+            outputAU,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        if status != noErr {
+            debugLog("[ENGINE] Failed to set output device \(dev.name) (status=\(status))")
+        } else {
+            debugLog("[ENGINE] Output device set to \(dev.name) (\(dev.channelCount) ch)")
+        }
+    }
+
+    /// Inserts an Apple PeakLimiter between mainMixerNode and outputNode so
+    /// the final bus is brick-walled at ~0 dBFS, regardless of how many
+    /// physical channels the chosen device exposes. AVAudioEngine implicitly
     /// connects mainMixerNode → outputNode the first time mainMixerNode is
-    /// referenced; we tear that down and splice in the limiter.
+    /// referenced; we tear that down and splice in the limiter, using a
+    /// format that matches the device's channel count.
     private func installOutputLimiter() {
+        // Detach the previous limiter (device swap may have changed channels).
+        if let prev = outputLimiter {
+            audioEngine.disconnectNodeOutput(audioEngine.mainMixerNode)
+            audioEngine.detach(prev)
+            outputLimiter = nil
+        }
+
         let desc = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: kAudioUnitSubType_PeakLimiter,
@@ -65,10 +131,19 @@ class PlaybackEngine: ObservableObject {
         let limiter = AVAudioUnitEffect(audioComponentDescription: desc)
         let mainMixer = audioEngine.mainMixerNode  // forces implicit attach + connection
         let output    = audioEngine.outputNode
+
+        // Format we want to drive the device with. Float32, non-interleaved,
+        // N channels matching the device.
+        let sampleRate = output.outputFormat(forBus: 0).sampleRate
+        let multiFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                     sampleRate: sampleRate > 0 ? sampleRate : 48000,
+                                     channels: AVAudioChannelCount(currentChannelCount),
+                                     interleaved: false)
+
         audioEngine.disconnectNodeOutput(mainMixer)
         audioEngine.attach(limiter)
-        audioEngine.connect(mainMixer, to: limiter, format: nil)
-        audioEngine.connect(limiter,   to: output,  format: nil)
+        audioEngine.connect(mainMixer, to: limiter, format: multiFmt)
+        audioEngine.connect(limiter,   to: output,  format: multiFmt)
 
         // Tighten attack/decay for transient-heavy backing tracks. Pre-gain
         // stays at 0 dB — loudness is the user's job via per-cue volume.
@@ -214,7 +289,21 @@ class PlaybackEngine: ObservableObject {
             cue.mixerNode.volume = item.masterVolume
             cue.gainAU.leftGain  = item.leftVolume
             cue.gainAU.rightGain = item.rightVolume
-            cue.gainAU.routing   = item.outputRouting.auMode
+
+            // Bus → channel may have changed under the cue (user picked a
+            // different bus, or remapped the bus on this device). Update
+            // placement live; output channel count is fixed at allocation.
+            let busStore = OutputBusStore.shared
+            let deviceUID = AudioOutputManager.shared.currentDevice?.uid
+            let asn: BusAssignment = {
+                if let uid = deviceUID,
+                   let a = busStore.assignment(busID: item.outputRouting.busID, deviceUID: uid) {
+                    return a
+                }
+                return .stereo(startChannel: 1)
+            }()
+            cue.gainAU.isMonoSum    = asn.isMonoSum
+            cue.gainAU.startChannel = Int32(max(0, asn.startChannel - 1))
         }
         if let player = videoPlayers[item.id] {
             player.volume = item.masterVolume
@@ -332,19 +421,40 @@ class PlaybackEngine: ObservableObject {
         let gainAU     = gainUnit.auAudioUnit as! ChannelGainAU
         let mixer      = AVAudioMixerNode()
 
-        gainAU.leftGain  = item.leftVolume
-        gainAU.rightGain = item.rightVolume
-        gainAU.routing   = item.outputRouting.auMode
+        // Resolve the cue's bus → physical channel(s) on the active device.
+        // Falls back to stereo on channel 1 if the bus is unmapped or
+        // missing, so a misconfigured rig still produces audible output
+        // instead of a silent surprise.
+        let busStore = OutputBusStore.shared
+        let deviceUID = AudioOutputManager.shared.currentDevice?.uid
+        let asn: BusAssignment = {
+            if let uid = deviceUID,
+               let a = busStore.assignment(busID: item.outputRouting.busID, deviceUID: uid) {
+                return a
+            }
+            return .stereo(startChannel: 1)
+        }()
+
+        gainAU.leftGain   = item.leftVolume
+        gainAU.rightGain  = item.rightVolume
+        gainAU.isMonoSum  = asn.isMonoSum
+        gainAU.startChannel = Int32(max(0, asn.startChannel - 1))
+        try? gainAU.setOutputChannelCount(currentChannelCount,
+                                          sampleRate: file.processingFormat.sampleRate)
         mixer.volume     = item.masterVolume
 
         audioEngine.attach(playerNode)
         audioEngine.attach(gainUnit)
         audioEngine.attach(mixer)
 
-        let fmt = file.processingFormat
-        audioEngine.connect(playerNode, to: gainUnit, format: fmt)
-        audioEngine.connect(gainUnit,   to: mixer,    format: fmt)
-        audioEngine.connect(mixer, to: audioEngine.mainMixerNode, format: nil)
+        let inFmt  = file.processingFormat
+        let outFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                   sampleRate: inFmt.sampleRate,
+                                   channels: AVAudioChannelCount(currentChannelCount),
+                                   interleaved: false)
+        audioEngine.connect(playerNode, to: gainUnit, format: inFmt)
+        audioEngine.connect(gainUnit,   to: mixer,    format: outFmt)
+        audioEngine.connect(mixer, to: audioEngine.mainMixerNode, format: outFmt)
 
         // If a loop end point is set after the start, schedule the segment as a
         // looping buffer (start → end → start → end …). Otherwise play to EOF once.
