@@ -142,7 +142,6 @@ class PlaybackEngine: ObservableObject {
             let nodeRate = output.outputFormat(forBus: 0).sampleRate
             sampleRate = nodeRate > 0 ? nodeRate : 48000
         }
-        debugLog("[ENGINE] Limiter chain at \(sampleRate) Hz × \(currentChannelCount) ch")
         let multiFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                      sampleRate: sampleRate,
                                      channels: AVAudioChannelCount(currentChannelCount),
@@ -303,15 +302,13 @@ class PlaybackEngine: ObservableObject {
             // placement live; output channel count is fixed at allocation.
             let busStore = OutputBusStore.shared
             let deviceUID = AudioOutputManager.shared.currentDevice?.uid
-            let asn: BusAssignment = {
-                if let uid = deviceUID,
-                   let a = busStore.assignment(busID: item.outputRouting.busID, deviceUID: uid) {
-                    return a
-                }
-                return .stereo(startChannel: 1)
-            }()
-            cue.gainAU.isMonoSum    = asn.isMonoSum
-            cue.gainAU.startChannel = Int32(max(0, asn.startChannel - 1))
+            let asn: BusAssignment? = deviceUID.flatMap {
+                busStore.assignment(busID: item.outputRouting.busID, deviceUID: $0)
+            }
+            let placement = asn ?? .stereo(startChannel: 1)
+            cue.gainAU.isMonoSum    = placement.isMonoSum
+            cue.gainAU.startChannel = Int32(max(0, placement.startChannel - 1))
+            cue.gainAU.isMuted      = (asn == nil)
         }
         if let player = videoPlayers[item.id] {
             player.volume = item.masterVolume
@@ -430,23 +427,22 @@ class PlaybackEngine: ObservableObject {
         let mixer      = AVAudioMixerNode()
 
         // Resolve the cue's bus → physical channel(s) on the active device.
-        // Falls back to stereo on channel 1 if the bus is unmapped or
-        // missing, so a misconfigured rig still produces audible output
-        // instead of a silent surprise.
+        // No assignment on this device == intentionally silent: the chain
+        // still runs (autoFollow / lyrics / timer all proceed) but no
+        // audio reaches the output. This lets users mute, say, a click
+        // bus on the rehearsal rig without changing per-cue routing.
         let busStore = OutputBusStore.shared
         let deviceUID = AudioOutputManager.shared.currentDevice?.uid
-        let asn: BusAssignment = {
-            if let uid = deviceUID,
-               let a = busStore.assignment(busID: item.outputRouting.busID, deviceUID: uid) {
-                return a
-            }
-            return .stereo(startChannel: 1)
-        }()
+        let asn: BusAssignment? = deviceUID.flatMap {
+            busStore.assignment(busID: item.outputRouting.busID, deviceUID: $0)
+        }
+        let placement = asn ?? .stereo(startChannel: 1)
 
         gainAU.leftGain   = item.leftVolume
         gainAU.rightGain  = item.rightVolume
-        gainAU.isMonoSum  = asn.isMonoSum
-        gainAU.startChannel = Int32(max(0, asn.startChannel - 1))
+        gainAU.isMonoSum  = placement.isMonoSum
+        gainAU.startChannel = Int32(max(0, placement.startChannel - 1))
+        gainAU.isMuted    = (asn == nil)
         try? gainAU.setOutputChannelCount(currentChannelCount,
                                           sampleRate: file.processingFormat.sampleRate)
         mixer.volume     = item.masterVolume

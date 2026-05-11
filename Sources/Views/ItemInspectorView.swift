@@ -781,11 +781,11 @@ struct BusPicker: View {
             Text(mixed).foregroundColor(.secondary).italic()
         } else if let id = currentBusID, let bus = busStore.bus(id: id) {
             let chan = channelLabel(for: id)
-            let unmapped = chan == "Not mapped" || chan == "Out of range"
+            let warn = chan == "Muted" || chan == "Out of range"
             Text("\(bus.name) — \(chan)")
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .foregroundColor(unmapped ? .orange : .primary)
+                .foregroundColor(warn ? .orange : .primary)
         } else {
             Text("Unknown bus").foregroundColor(.orange).italic()
         }

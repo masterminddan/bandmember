@@ -227,14 +227,16 @@ final class OutputBusStore: ObservableObject {
 
     // MARK: - Display helpers
 
-    /// "Outputs 1-2" / "Output 3 (mono)" / "Not mapped" / "Out of range" —
+    /// "Outputs 1-2" / "Output 3 (mono)" / "Muted" / "Out of range" —
     /// shown as the trailing label in dropdowns. `deviceChannelCount`
     /// validates that the assignment still fits the device.
+    /// A bus with no assignment is silent on this device, not falling
+    /// back to a default — hence "Muted".
     func channelLabel(busID: UUID, deviceUID: String?, deviceChannelCount: Int) -> String {
         guard bus(id: busID) != nil else { return "—" }
         guard let uid = deviceUID,
               let asn = assignment(busID: busID, deviceUID: uid) else {
-            return "Not mapped"
+            return "Muted"
         }
         let last = asn.startChannel + asn.channelWidth - 1
         if last > deviceChannelCount { return "Out of range" }

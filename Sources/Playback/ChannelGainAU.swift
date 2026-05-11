@@ -41,6 +41,11 @@ class ChannelGainAU: AUAudioUnit {
     private let isMonoSumPtr: UnsafeMutablePointer<Int32>
     private let startChannelPtr: UnsafeMutablePointer<Int32>
     private let outputChannelCountPtr: UnsafeMutablePointer<Int32>
+    /// When set, the render block emits silence on every output channel
+    /// regardless of the input. Used when a cue's bus has no assignment
+    /// on the active device — the rest of the chain (mixer, lyrics sync,
+    /// autoFollow) keeps running but no audio reaches the device.
+    private let isMutedPtr: UnsafeMutablePointer<Int32>
 
     /// Legacy "mode" parameter: 0 = stereo, 1 = mono-sum (single channel).
     /// Kept as `routing` so existing call sites keep compiling; new code
@@ -70,6 +75,11 @@ class ChannelGainAU: AUAudioUnit {
         get { outputChannelCountPtr.pointee }
         set { outputChannelCountPtr.pointee = newValue }
     }
+    /// When true, the AU outputs silence regardless of input.
+    var isMuted: Bool {
+        get { isMutedPtr.pointee != 0 }
+        set { isMutedPtr.pointee = newValue ? 1 : 0 }
+    }
     /// Legacy: 0 = stereo, 1 = mono-sum. Kept for backward compatibility.
     var routing: Int32 {
         get { routingPtr.pointee }
@@ -92,12 +102,14 @@ class ChannelGainAU: AUAudioUnit {
         isMonoSumPtr = .allocate(capacity: 1)
         startChannelPtr = .allocate(capacity: 1)
         outputChannelCountPtr = .allocate(capacity: 1)
+        isMutedPtr = .allocate(capacity: 1)
         routingPtr = .allocate(capacity: 1)
         leftGainPtr.initialize(to: 1.0)
         rightGainPtr.initialize(to: 1.0)
         isMonoSumPtr.initialize(to: 0)
         startChannelPtr.initialize(to: 0)
         outputChannelCountPtr.initialize(to: 2)
+        isMutedPtr.initialize(to: 0)
         routingPtr.initialize(to: 0)
 
         try super.init(componentDescription: componentDescription, options: options)
@@ -127,6 +139,7 @@ class ChannelGainAU: AUAudioUnit {
         isMonoSumPtr.deinitialize(count: 1); isMonoSumPtr.deallocate()
         startChannelPtr.deinitialize(count: 1); startChannelPtr.deallocate()
         outputChannelCountPtr.deinitialize(count: 1); outputChannelCountPtr.deallocate()
+        isMutedPtr.deinitialize(count: 1); isMutedPtr.deallocate()
         routingPtr.deinitialize(count: 1); routingPtr.deallocate()
         deallocatePullBuffer()
     }
@@ -214,6 +227,7 @@ class ChannelGainAU: AUAudioUnit {
         let rightPtr  = rightGainPtr
         let monoPtr   = isMonoSumPtr
         let startPtr  = startChannelPtr
+        let mutePtr   = isMutedPtr
         let pullABL   = pullBufferList
         let pullL     = pullBufferL
         let pullR     = pullBufferR
@@ -261,6 +275,14 @@ class ChannelGainAU: AUAudioUnit {
                 if let data = outABL[c].mData {
                     memset(data, 0, Int(outABL[c].mDataByteSize))
                 }
+            }
+
+            // Muted: outputs stay zeroed, but the upstream pull above has
+            // already advanced the player node, so the cue's scheduled
+            // segment still completes on time (autoFollow and lyrics sync
+            // depend on that).
+            if mutePtr.pointee != 0 {
+                return noErr
             }
 
             // Compute placement. Clamp so an out-of-range startChannel

@@ -238,9 +238,9 @@ struct OutputMappingEditor: View {
                     busStore.setAssignment(busID: bus.id, deviceUID: deviceUID, assignment: nil)
                 }) {
                     if current == nil {
-                        Label("Not assigned", systemImage: "checkmark")
+                        Label("Muted (no output)", systemImage: "checkmark")
                     } else {
-                        Text("Not assigned")
+                        Text("Muted (no output)")
                     }
                 }
                 if channelCount >= 2 {
@@ -307,7 +307,7 @@ struct OutputMappingEditor: View {
     }
 
     private func displayLabel(for current: BusAssignment?, channelCount: Int) -> String {
-        guard let asn = current else { return "Not assigned" }
+        guard let asn = current else { return "Muted (no output)" }
         let last = asn.startChannel + asn.channelWidth - 1
         if last > channelCount { return "Out of range (\(asn.startChannel))" }
         switch asn {
