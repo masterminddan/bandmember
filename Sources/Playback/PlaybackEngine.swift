@@ -42,6 +42,11 @@ class PlaybackEngine: ObservableObject {
     /// it on the engine when it changes.
     private var deviceCancellable: AnyCancellable?
 
+    /// Last wall-clock second the limiter tap logged its RMS reading. Used
+    /// to bucket the 30-100 tap callbacks/sec down to one log line per
+    /// second — enough resolution to spot drops while keeping the log tidy.
+    private var lastTapLogSecond: Int = -1
+
     // ── Video (still uses AVPlayer per-cue) ──────────────────────────
     private var videoPlayers: [UUID: AVPlayer] = [:]
     private var videoWindows: [UUID: NSWindow] = [:]
@@ -116,6 +121,7 @@ class PlaybackEngine: ObservableObject {
     private func installOutputLimiter() {
         // Detach the previous limiter (device swap may have changed channels).
         if let prev = outputLimiter {
+            prev.removeTap(onBus: 0)
             audioEngine.disconnectNodeOutput(audioEngine.mainMixerNode)
             audioEngine.detach(prev)
             outputLimiter = nil
@@ -159,7 +165,51 @@ class PlaybackEngine: ObservableObject {
         AudioUnitSetParameter(limiter.audioUnit, kLimiterParam_DecayTime,
                               kAudioUnitScope_Global, 0, 0.030, 0)
         outputLimiter = limiter
+
+        // RMS tap is a developer-only diagnostic — it's the noisiest line in
+        // the log (one row/sec during playback) and only earns its keep when
+        // chasing a silent-playback regression. Excluded from release builds.
+        #if DEBUG
+        if let fmt = multiFmt { installLimiterTap(on: limiter, format: fmt) }
+        #endif
     }
+
+    #if DEBUG
+    /// Once-per-second RMS log on the limiter output. This is what we'd
+    /// actually be sending to the device — if a "silent playback" report
+    /// coincides with non-trivial RMS here, the audio left the app fine
+    /// and the problem is OS/device-side (volume sync, hardware mute).
+    /// If RMS is at the noise floor while cues are active, the audio graph
+    /// itself is dropping signal somewhere and we need to look upstream.
+    private func installLimiterTap(on limiter: AVAudioUnitEffect, format: AVAudioFormat) {
+        limiter.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            guard let self = self else { return }
+            let frames = Int(buffer.frameLength)
+            guard frames > 0, let chData = buffer.floatChannelData else { return }
+            let chCount = Int(buffer.format.channelCount)
+            var sumSq: Float = 0
+            for c in 0..<chCount {
+                let ptr = chData[c]
+                for i in 0..<frames { sumSq += ptr[i] * ptr[i] }
+            }
+            let mean = sumSq / Float(frames * chCount)
+            let rms  = sqrtf(mean)
+            let dbfs: Float = rms > 1e-9 ? 20 * log10f(rms) : -120
+
+            // Hop to main only to decide whether to log + read cue state.
+            // Real-time-thread work here is just the RMS math above.
+            DispatchQueue.main.async {
+                guard !self.audioCues.isEmpty else { return }
+                let nowSec = Int(Date().timeIntervalSince1970)
+                if nowSec != self.lastTapLogSecond {
+                    self.lastTapLogSecond = nowSec
+                    debugLog(String(format: "[ENGINE] tap RMS=%.1f dBFS (cues=%d)",
+                                    dbfs, self.audioCues.count))
+                }
+            }
+        }
+    }
+    #endif
 
     deinit { stopAll() }
 
@@ -326,6 +376,7 @@ class PlaybackEngine: ObservableObject {
     private func playSynchronized(items: [PlaylistItem], startTime: Double = 0, endTime: Double? = nil) {
         let endStr = endTime.map { "\($0)" } ?? "nil"
         debugLog("[ENGINE] playSynchronized: \(items.map { $0.name }) startTime=\(startTime)s endTime=\(endStr)")
+        logPreplaySnapshot(items: items)
 
         var audioItems: [(item: PlaylistItem, cue: AudioCue)] = []
         var videoItems: [(item: PlaylistItem, player: AVPlayer)]  = []
@@ -360,6 +411,8 @@ class PlaybackEngine: ObservableObject {
             } catch {
                 debugLog("[ENGINE] Failed to start audio engine: \(error)")
             }
+        } else if !audioItems.isEmpty {
+            debugLog("[ENGINE] Audio engine already running (isRunning=true), reusing")
         }
 
         // Mark all as playing
@@ -415,8 +468,21 @@ class PlaybackEngine: ObservableObject {
         let sampleRate = file.processingFormat.sampleRate
         let startFrame = AVAudioFramePosition(startTime * sampleRate)
 
-        // Skip if this file is shorter than the start position
-        if startFrame >= file.length {
+        // AVAudioFile.length underreports for MP3 / AAC (decoder priming +
+        // padding ignored), losing up to ~1s at the tail. AVURLAsset.duration
+        // reads the format-level metadata and matches what AVAudioPlayer
+        // would play. We use it as the authoritative end-of-cue marker.
+        let asset = AVURLAsset(url: item.fileURL)
+        let assetDuration = CMTimeGetSeconds(asset.duration)
+        let fileLengthSeconds = Double(file.length) / sampleRate
+        let needsFullDecode = assetDuration.isFinite
+            && assetDuration > fileLengthSeconds + 0.02
+
+        // For skip-check, use whichever length is larger so we don't reject a
+        // legitimate start time that's within the asset but past file.length.
+        let effectiveLengthSeconds = max(assetDuration.isFinite ? assetDuration : 0,
+                                         fileLengthSeconds)
+        if startTime >= effectiveLengthSeconds {
             debugLog("[ENGINE] \(item.name) is shorter than start time \(startTime)s, skipping")
             return nil
         }
@@ -470,12 +536,31 @@ class PlaybackEngine: ObservableObject {
                                        endTime: endPos,
                                        sampleRate: sampleRate) {
             playerNode.scheduleBuffer(loopBuffer, at: nil, options: .loops, completionHandler: nil)
+        } else if needsFullDecode,
+                  let segmentBuffer = decodeAssetSlice(url: item.fileURL,
+                                                       processingFormat: inFmt,
+                                                       startTime: startTime,
+                                                       assetDuration: assetDuration) {
+            // MP3 / AAC path: AVAssetReader sees the full asset, so we
+            // schedule a buffer holding every decoded frame. AVAudioFile-only
+            // scheduling would truncate the tail by encoder priming + padding.
+            debugLog(String(format: "[ENGINE] \(item.name) full-decode buffer: %d frames (%.2fs at %.0f Hz); fileLen=%.2fs assetDur=%.2fs",
+                            segmentBuffer.frameLength,
+                            Double(segmentBuffer.frameLength) / sampleRate,
+                            sampleRate, fileLengthSeconds, assetDuration))
+            playerNode.scheduleBuffer(segmentBuffer, at: nil, options: [], completionHandler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.audioDidFinishNaturally(itemID: item.id)
+                }
+            })
         } else {
+            // PCM / WAV / AIFF path (and fallback if full decode failed):
+            // AVAudioFile.length matches the asset exactly.
             let remainingFrames = AVAudioFrameCount(file.length - startFrame)
             playerNode.scheduleSegment(file, startingFrame: startFrame,
                                        frameCount: remainingFrames, at: nil) { [weak self] in
                 DispatchQueue.main.async {
-                    self?.stop(itemID: item.id)
+                    self?.audioDidFinishNaturally(itemID: item.id)
                 }
             }
         }
@@ -489,7 +574,63 @@ class PlaybackEngine: ObservableObject {
                            startPosition: startTime,
                            loopEndPosition: loopEnd)
         audioCues[item.id] = cue
+
+        let busName = OutputBusStore.shared.bus(id: item.outputRouting.busID)?.name ?? "?"
+        let placementStr: String = {
+            switch placement {
+            case .stereo(let c):  return "stereo@\(c)"
+            case .monoSum(let c): return "monoSum@\(c)"
+            }
+        }()
+        let mutedStr = (asn == nil) ? " MUTED(no asn for device)" : ""
+        debugLog("[ENGINE] cue \(item.name): bus=\(busName) placement=\(placementStr) startCh0b=\(gainAU.startChannel) isMonoSum=\(gainAU.isMonoSum) isMuted=\(gainAU.isMuted) masterVol=\(item.masterVolume) L=\(item.leftVolume) R=\(item.rightVolume) outChans=\(currentChannelCount)\(mutedStr)")
         return cue
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // MARK: - Diagnostics
+    // ══════════════════════════════════════════════════════════════════
+
+    /// Logs a full snapshot of engine + device state right before a play.
+    /// Tuning aid for the intermittent silent-playback bug: comparing a
+    /// silent attempt's snapshot against a working one lets us narrow down
+    /// what actually differs (which device, which sample rate, whether the
+    /// output AU is pointing where we think it is).
+    private func logPreplaySnapshot(items: [PlaylistItem]) {
+        let mgr = AudioOutputManager.shared
+        let dev = mgr.currentDevice
+        let devStr = dev.map { "\($0.name) (id=\($0.id), uid=\($0.uid), \($0.channelCount) ch)" } ?? "nil"
+        debugLog("[ENGINE] snapshot: currentDevice=\(devStr) persistedUID=\(mgr.currentUID ?? "nil")")
+
+        // What the output AU is actually targeting (not necessarily what
+        // currentDevice says it *should* be — that's the whole question).
+        if let outputAU = audioEngine.outputNode.audioUnit {
+            var auDeviceID: AudioDeviceID = 0
+            var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+            let status = AudioUnitGetProperty(
+                outputAU,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global, 0,
+                &auDeviceID, &size
+            )
+            if status == noErr {
+                let match = (dev?.id == auDeviceID) ? " (matches currentDevice)" : " (MISMATCH with currentDevice)"
+                debugLog("[ENGINE] snapshot: output AU device id=\(auDeviceID)\(match)")
+            } else {
+                debugLog("[ENGINE] snapshot: output AU device query failed (status=\(status))")
+            }
+        } else {
+            debugLog("[ENGINE] snapshot: output AU is nil")
+        }
+
+        let outFmt = audioEngine.outputNode.outputFormat(forBus: 0)
+        debugLog("[ENGINE] snapshot: outputNode format sr=\(outFmt.sampleRate) ch=\(outFmt.channelCount); currentChannelCount=\(currentChannelCount); engineRunning=\(audioEngine.isRunning)")
+
+        if let nodeTime = audioEngine.outputNode.lastRenderTime {
+            debugLog("[ENGINE] snapshot: lastRenderTime sampleTimeValid=\(nodeTime.isSampleTimeValid) sampleTime=\(nodeTime.sampleTime) sampleRate=\(nodeTime.sampleRate) hostTimeValid=\(nodeTime.isHostTimeValid)")
+        } else {
+            debugLog("[ENGINE] snapshot: lastRenderTime=nil")
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -523,6 +664,127 @@ class PlaybackEngine: ObservableObject {
         return nil
     }
 
+    /// Decodes an entire audio asset via `AVAssetReader` into a PCM buffer,
+    /// then returns the slice starting at `startTime`. Used for compressed
+    /// formats (MP3 / AAC) where `AVAudioFile.length` undercounts frames and
+    /// `scheduleSegment` would clip the tail by encoder priming + padding.
+    ///
+    /// Decoding is synchronous on the calling thread. For a 100 s stereo
+    /// file at 48 kHz it allocates ~38 MB and takes a few hundred ms; the
+    /// buffer is held by the cue and freed when the cue tears down.
+    private func decodeAssetSlice(url: URL,
+                                  processingFormat: AVAudioFormat,
+                                  startTime: Double,
+                                  assetDuration: Double) -> AVAudioPCMBuffer? {
+        let asset = AVURLAsset(url: url)
+        guard let audioTrack = asset.tracks(withMediaType: .audio).first else {
+            debugLog("[ENGINE] decodeAssetSlice: no audio track in \(url.lastPathComponent)")
+            return nil
+        }
+
+        let reader: AVAssetReader
+        do {
+            reader = try AVAssetReader(asset: asset)
+        } catch {
+            debugLog("[ENGINE] decodeAssetSlice: AVAssetReader init failed: \(error)")
+            return nil
+        }
+
+        // Decode as interleaved float32 — CMSampleBuffer's block buffer is
+        // one contiguous interleaved span we can read straight through.
+        // We'll deinterleave into the non-interleaved AVAudioPCMBuffer that
+        // matches the engine's processingFormat.
+        let chCount = Int(processingFormat.channelCount)
+        let outputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: processingFormat.sampleRate,
+            AVNumberOfChannelsKey: chCount,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+            AVLinearPCMIsBigEndianKey: false,
+        ]
+        let trackOutput = AVAssetReaderTrackOutput(track: audioTrack,
+                                                    outputSettings: outputSettings)
+        reader.add(trackOutput)
+        guard reader.startReading() else {
+            debugLog("[ENGINE] decodeAssetSlice: startReading failed: \(reader.error?.localizedDescription ?? "?")")
+            return nil
+        }
+
+        // Capacity = asset duration × sample rate + 5 % headroom for encoder
+        // padding the reader may emit beyond the nominal duration.
+        let estCap = AVAudioFrameCount((assetDuration * processingFormat.sampleRate * 1.05).rounded(.up))
+        guard estCap > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: processingFormat,
+                                            frameCapacity: estCap) else {
+            debugLog("[ENGINE] decodeAssetSlice: PCM buffer alloc failed (cap=\(estCap))")
+            return nil
+        }
+
+        var totalFrames: AVAudioFrameCount = 0
+        while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
+            let frames = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+            guard frames > 0,
+                  let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
+
+            // Stop cleanly if the reader handed us more frames than capacity.
+            // Should be rare given the 5 % headroom, but better than overwriting.
+            if totalFrames + frames > buffer.frameCapacity {
+                debugLog("[ENGINE] decodeAssetSlice: capacity exceeded at \(totalFrames + frames) (cap=\(buffer.frameCapacity)); truncating")
+                break
+            }
+
+            var dataPtr: UnsafeMutablePointer<Int8>?
+            let status = CMBlockBufferGetDataPointer(blockBuffer,
+                                                     atOffset: 0,
+                                                     lengthAtOffsetOut: nil,
+                                                     totalLengthOut: nil,
+                                                     dataPointerOut: &dataPtr)
+            guard status == kCMBlockBufferNoErr, let dataPtr = dataPtr else { continue }
+
+            let interleaved = dataPtr.withMemoryRebound(to: Float.self,
+                                                        capacity: Int(frames) * chCount) { $0 }
+            // Deinterleave into the per-channel pointers of `buffer`.
+            guard let channelData = buffer.floatChannelData else { continue }
+            let dstOffset = Int(totalFrames)
+            for c in 0..<chCount {
+                let dst = channelData[c].advanced(by: dstOffset)
+                for f in 0..<Int(frames) {
+                    dst[f] = interleaved[f * chCount + c]
+                }
+            }
+            totalFrames += frames
+        }
+
+        if reader.status == .failed {
+            debugLog("[ENGINE] decodeAssetSlice: read failed: \(reader.error?.localizedDescription ?? "?")")
+            return nil
+        }
+        buffer.frameLength = totalFrames
+
+        // Slice from startTime onward. For startTime == 0 we'd return `buffer`
+        // directly, but slicing keeps memory tidy (the unused head is freed).
+        let startFrame = Int(startTime * processingFormat.sampleRate)
+        guard startFrame < Int(totalFrames) else { return nil }
+        if startFrame == 0 { return buffer }
+
+        let sliceFrames = AVAudioFrameCount(Int(totalFrames) - startFrame)
+        guard let slice = AVAudioPCMBuffer(pcmFormat: processingFormat,
+                                           frameCapacity: sliceFrames) else {
+            return buffer  // fallback: just return the full buffer
+        }
+        if let srcCh = buffer.floatChannelData, let dstCh = slice.floatChannelData {
+            for c in 0..<chCount {
+                memcpy(dstCh[c],
+                       srcCh[c].advanced(by: startFrame),
+                       Int(sliceFrames) * MemoryLayout<Float>.size)
+            }
+        }
+        slice.frameLength = sliceFrames
+        return slice
+    }
+
     /// Reads a [startFrame, endTime] segment from `file` into a PCM buffer for loop scheduling.
     private func readBuffer(from file: AVAudioFile,
                             startFrame: AVAudioFramePosition,
@@ -541,6 +803,15 @@ class PlaybackEngine: ObservableObject {
             return nil
         }
         return buffer.frameLength > 0 ? buffer : nil
+    }
+
+    /// Called when an audio cue's scheduled segment finishes rendering on
+    /// its own (vs. an explicit user stop). Drops the cue from the engine
+    /// but intentionally leaves any open lyric presenter running — see the
+    /// scheduleSegment call-site comment for why.
+    private func audioDidFinishNaturally(itemID: UUID) {
+        stopAudio(itemID: itemID)
+        store?.playingItemIDs.remove(itemID)
     }
 
     private func stopAudio(itemID: UUID) {

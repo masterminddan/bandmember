@@ -58,17 +58,37 @@ final class LyricsPresenter {
 
         var lastLoggedBucket: Int = -2
         let timerStart = Date()
+        // Self-close threshold: the last lyric segment's end + a small grace
+        // window so the final line gets a moment of display. MP3
+        // `AVAudioFile.length` often underreports duration by ~1s, which
+        // would otherwise tear the presenter down before the last lines
+        // had a chance to appear. Decoupling the close time from audio
+        // completion fixes that.
+        let lyricsEndTime: Double = lyrics.segments.map { $0.end }.max() ?? 0
+        let closeAfterTime = lyricsEndTime + 0.5
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak engine] _ in
-            guard let engine = engine else { return }
-            let t = engine.currentTime(for: item.id) ?? item.startPosition
+            // Prefer the engine's reported time while the cue is alive; fall
+            // back to wall-clock once the cue tears down so the last lines
+            // still appear even if the audio finished a hair early.
+            let engineT = engine?.currentTime(for: item.id)
+            let t = engineT ?? (item.startPosition + Date().timeIntervalSince(timerStart))
+
             // Log once per second (bucketed on floor(t)) so the log shows the
             // reported time progression without spamming 30 lines/sec.
             let bucket = Int(t.rounded(.down))
             if bucket != lastLoggedBucket {
                 lastLoggedBucket = bucket
                 let wall = Date().timeIntervalSince(timerStart)
-                debugLog(String(format: "LyricsTimer[%@]: t=%.2fs (wall=%.2fs)", item.name, t, wall))
+                let src = engineT != nil ? "engine" : "wall"
+                debugLog(String(format: "LyricsTimer[%@]: t=%.2fs (wall=%.2fs, src=%@)", item.name, t, wall, src))
             }
+
+            // Self-close once we've shown everything.
+            if t >= closeAfterTime {
+                LyricsPresenter.hide(itemID: item.id)
+                return
+            }
+
             DispatchQueue.main.async {
                 state.update(time: t)
             }

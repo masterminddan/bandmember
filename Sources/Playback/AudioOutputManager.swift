@@ -35,16 +35,31 @@ final class AudioOutputManager: ObservableObject {
 
     private let kCurrentUIDKey = "audioOutputDeviceUID"
     private var deviceListListener: AudioObjectPropertyListenerBlock?
+    private var defaultDeviceListener: AudioObjectPropertyListenerBlock?
+    /// Last-resolved current device (id+uid). Used by `refresh()` to detect
+    /// when the device list change actually flipped which device the engine
+    /// would target, so we can log it and (later) trigger a reconfigure.
+    private var lastResolvedDeviceID: AudioObjectID = 0
+    private var lastResolvedDeviceUID: String?
 
     init() {
         self.currentUID = UserDefaults.standard.string(forKey: kCurrentUIDKey)
         refresh()
         installDeviceListListener()
+        installDefaultDeviceListener()
         ensureMappingForCurrent()
+        if let dev = currentDevice {
+            lastResolvedDeviceID = dev.id
+            lastResolvedDeviceUID = dev.uid
+            debugLog("[AOM] init: resolved device = \(dev.name) (id=\(dev.id), uid=\(dev.uid), \(dev.channelCount) ch), persistedUID=\(currentUID ?? "nil")")
+        } else {
+            debugLog("[AOM] init: no resolvable output device; persistedUID=\(currentUID ?? "nil")")
+        }
     }
 
     deinit {
         removeDeviceListListener()
+        removeDefaultDeviceListener()
     }
 
     // MARK: - Lookup
@@ -99,6 +114,18 @@ final class AudioOutputManager: ObservableObject {
         result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         self.devices = result
         ensureMappingForCurrent()
+
+        // If the resolved current device changed (e.g. headphones plugged in
+        // and macOS flipped its system default while our persisted device is
+        // missing), log it. The engine doesn't yet react to this, but the
+        // log line tells us when a silent-play bug coincides with a swap.
+        if let dev = currentDevice {
+            if dev.id != lastResolvedDeviceID || dev.uid != lastResolvedDeviceUID {
+                debugLog("[AOM] device-list refresh: resolved device changed → \(dev.name) (id=\(dev.id), uid=\(dev.uid), \(dev.channelCount) ch)")
+                lastResolvedDeviceID = dev.id
+                lastResolvedDeviceUID = dev.uid
+            }
+        }
     }
 
     // MARK: - Mapping bootstrap
@@ -208,6 +235,46 @@ final class AudioOutputManager: ObservableObject {
             AudioObjectID(kAudioObjectSystemObject), &addr, DispatchQueue.main, block
         )
         if status == noErr { self.deviceListListener = block }
+    }
+
+    /// Watches `kAudioHardwarePropertyDefaultOutputDevice` so we notice when
+    /// macOS auto-switches the system default (headphone plug, AirPods
+    /// connect, etc.). When our persisted device isn't connected, the
+    /// engine resolves to system default — so a switch here changes which
+    /// physical device we should be driving.
+    private func installDefaultDeviceListener() {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                // Refresh first so the devices list reflects any concurrent
+                // hot-swap, then log the resolved default.
+                self.refresh()
+                let def = self.systemDefaultDevice()
+                let defStr = def.map { "\($0.name) (id=\($0.id))" } ?? "nil"
+                debugLog("[AOM] system default output changed → \(defStr)")
+            }
+        }
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &addr, DispatchQueue.main, block
+        )
+        if status == noErr { self.defaultDeviceListener = block }
+    }
+
+    private func removeDefaultDeviceListener() {
+        guard let block = defaultDeviceListener else { return }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &addr, DispatchQueue.main, block
+        )
     }
 
     private func removeDeviceListListener() {
