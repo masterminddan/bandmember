@@ -21,8 +21,13 @@ final class EditorAudioPlayer {
 
     let duration: Double
 
+    /// Source of truth is `AVAudioPlayerNode.isPlaying`. Don't gate this on
+    /// any internal "natural-ended" flag — `playerNode.stop()` (called when
+    /// reseeking on resume) fires pending buffers' completion handlers, so a
+    /// flag set from those completions would flip false right when the new
+    /// buffer is actually playing and freeze the editor's poll timer.
     var isPlaying: Bool {
-        startWallDate != nil && pausedAt == nil && !naturalEnded
+        playerNode.isPlaying
     }
 
     /// Current playhead in seconds, [0, duration]. Reading is wall-clock
@@ -33,7 +38,15 @@ final class EditorAudioPlayer {
     /// just stores the position for the next play().
     var currentTime: Double {
         get {
-            if naturalEnded { return duration }
+            // Wall-clock advance while actively playing. Once playback halts
+            // (pause, stop, or natural end) `currentTime` reads from
+            // `pausedAt` (if user paused) or the last-known `startWallDate`-
+            // derived value clamped to `duration`. The `min(duration, ...)`
+            // cap is what makes natural end land cleanly on the song's end.
+            if playerNode.isPlaying, let start = startWallDate {
+                let elapsed = max(0, Date().timeIntervalSince(start))
+                return min(duration, startOffset + elapsed)
+            }
             if let paused = pausedAt { return paused }
             if let start = startWallDate {
                 let elapsed = max(0, Date().timeIntervalSince(start))
@@ -62,11 +75,6 @@ final class EditorAudioPlayer {
     /// Set when `pause()` is called; holds the captured currentTime so
     /// resume can re-start the player node from that position.
     private var pausedAt: Double?
-    /// Set by the scheduled buffer's completion handler when playback
-    /// reaches the end naturally. Keeps `isPlaying` honest so the editor's
-    /// poll loop notices and shuts itself down.
-    private var naturalEnded: Bool = false
-
     private var deviceCancellable: AnyCancellable?
 
     // MARK: - Init
@@ -131,21 +139,10 @@ final class EditorAudioPlayer {
     // MARK: - Transport
 
     func play() {
-        // Resuming from a pause uses the captured pause position; otherwise
-        // we continue from currentTime (which is startOffset when stopped).
-        let resumeFrom: Double
-        if let paused = pausedAt {
-            resumeFrom = paused
-        } else if naturalEnded {
-            // User hit play after the song ended — restart from current
-            // position (the editor sets currentTime=0 in this case before
-            // calling play, so we'll typically resume at 0).
-            resumeFrom = currentTime
-        } else {
-            resumeFrom = currentTime
-        }
+        // Resume from the pause point if we have one, otherwise from
+        // whatever `currentTime` reports (post-seek or post-stop position).
+        let resumeFrom = pausedAt ?? currentTime
         pausedAt = nil
-        naturalEnded = false
         scheduleAndStart(from: resumeFrom)
     }
 
@@ -162,13 +159,11 @@ final class EditorAudioPlayer {
         if engine.isRunning { engine.stop() }
         startWallDate = nil
         pausedAt = nil
-        naturalEnded = false
         startOffset = 0
     }
 
     private func seek(to time: Double) {
         let target = max(0, min(time, duration))
-        naturalEnded = false
         if isPlaying {
             // Reschedule from target. playerNode.stop clears any pending
             // schedule and lets us cleanly schedule a new segment.
@@ -193,21 +188,31 @@ final class EditorAudioPlayer {
             let startFrame = Int(target * sr)
             guard startFrame < Int(buf.frameLength),
                   let slice = sliceBufferFromFrame(buf, startFrame: startFrame) else {
+                debugLog(String(format: "[EDITOR] scheduleAndStart bail: startFrame=%d / bufLen=%d (target=%.2fs)",
+                                startFrame, Int(buf.frameLength), target))
                 return
             }
-            playerNode.scheduleBuffer(slice, at: nil, options: [], completionHandler: { [weak self] in
-                DispatchQueue.main.async { self?.naturalEnded = true }
-            })
+            // Completion handler intentionally omitted — it fires on
+            // cancellation as well as natural end, which we can't safely
+            // distinguish. `playerNode.isPlaying` is the truth source.
+            playerNode.scheduleBuffer(slice, at: nil, options: [],
+                                       completionHandler: nil)
+            debugLog(String(format: "[EDITOR] scheduled buffer: startFrame=%d sliceLen=%d (target=%.2fs)",
+                            startFrame, Int(slice.frameLength), target))
         } else if let file = file {
             let sr = file.processingFormat.sampleRate
             let startFrame = AVAudioFramePosition(target * sr)
-            guard startFrame < file.length else { return }
+            guard startFrame < file.length else {
+                debugLog(String(format: "[EDITOR] scheduleAndStart bail: file startFrame=%d / fileLen=%d",
+                                Int(startFrame), Int(file.length)))
+                return
+            }
             let remaining = AVAudioFrameCount(file.length - startFrame)
             playerNode.scheduleSegment(file, startingFrame: startFrame,
                                         frameCount: remaining, at: nil,
-                                        completionHandler: { [weak self] in
-                DispatchQueue.main.async { self?.naturalEnded = true }
-            })
+                                        completionHandler: nil)
+            debugLog(String(format: "[EDITOR] scheduled file segment: startFrame=%d remaining=%d (target=%.2fs)",
+                            Int(startFrame), Int(remaining), target))
         } else {
             debugLog("[EDITOR] no source to schedule")
             return
@@ -222,6 +227,9 @@ final class EditorAudioPlayer {
         playerNode.play()
         startOffset = target
         startWallDate = Date()
+        debugLog(String(format: "[EDITOR] playerNode.play() called. playerNode.isPlaying=%@, engine.isRunning=%@",
+                        String(describing: playerNode.isPlaying),
+                        String(describing: engine.isRunning)))
     }
 
     // MARK: - Device routing

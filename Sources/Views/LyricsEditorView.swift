@@ -164,21 +164,30 @@ final class LyricsEditorModel: ObservableObject {
 
     func togglePlay() {
         guard let p = player else { return }
-        if p.isPlaying {
+        let wasPlaying = p.isPlaying
+        debugLog(String(format: "[LYRIC-EDIT] togglePlay: pl.isPlaying=%@, model.currentTime=%.2fs",
+                        String(describing: wasPlaying), currentTime))
+        if wasPlaying {
             p.pause()
             isPlaying = false
             timer?.invalidate()
             timer = nil
+            debugLog("[LYRIC-EDIT] togglePlay → paused")
         } else {
             if currentTime >= duration - 0.05 { currentTime = 0 }
             p.currentTime = currentTime
             p.play()
             isPlaying = true
+            debugLog(String(format: "[LYRIC-EDIT] togglePlay → play(); pl.isPlaying=%@ now",
+                            String(describing: p.isPlaying)))
+            var tickCount = 0
             let t = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self else { return }
                     guard let pl = self.player else { return }
+                    tickCount += 1
                     if !pl.isPlaying {
+                        debugLog("[LYRIC-EDIT] timer bailing: pl.isPlaying=false at tick #\(tickCount)")
                         self.isPlaying = false
                         self.timer?.invalidate()
                         self.timer = nil
@@ -251,12 +260,18 @@ final class LyricsEditorModel: ObservableObject {
         let start = currentTime
         let defaultDur = 2.0
         let end = min(duration, start + defaultDur)
-        guard end > start + 0.1 else { return }
+        guard end > start + 0.1 else {
+            debugLog(String(format: "[LYRIC-EDIT] addAtPlayhead skipped: not enough room at end (currentTime=%.2fs, duration=%.2fs)",
+                            start, duration))
+            return
+        }
         let seg = LyricSegment(text: "New lyric", start: start, end: end)
         doc.segments.append(seg)
         doc.segments.sort { $0.start < $1.start }
         selectedSegmentID = seg.id
         markDirty()
+        debugLog(String(format: "[LYRIC-EDIT] addAtPlayhead: %.2f-%.2fs (now %d segments, dirty=true)",
+                        start, end, doc.segments.count))
     }
 
     func deleteSelected() {
