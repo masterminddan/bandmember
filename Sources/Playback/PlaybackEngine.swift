@@ -66,6 +66,7 @@ class PlaybackEngine: ObservableObject {
         )
         applySelectedOutputDevice()
         installOutputLimiter()
+        warmUpEngine()
 
         // Watch the user's device choice. Switching devices requires fully
         // tearing down the engine — we stop everything, swap, and let the
@@ -80,6 +81,23 @@ class PlaybackEngine: ObservableObject {
         stopAll()
         applySelectedOutputDevice()
         installOutputLimiter()
+        warmUpEngine()
+    }
+
+    /// Starts the audio engine idle so the first cue doesn't pay device-
+    /// acquisition latency (CoreAudio sample-rate / format / clock
+    /// negotiation, ~1-2 s on the first cold start with a new device).
+    /// Called from init and after device swaps. AVAudioEngine running with
+    /// no active sources just pulls silence at the device rate — no
+    /// measurable CPU or power impact until a cue actually plays.
+    private func warmUpEngine() {
+        guard !audioEngine.isRunning else { return }
+        do {
+            try audioEngine.start()
+            debugLog("[ENGINE] warmed up (idle, device acquired)")
+        } catch {
+            debugLog("[ENGINE] warmup start failed: \(error)")
+        }
     }
 
     /// Pushes the user's currently selected device down to the engine's
@@ -664,125 +682,18 @@ class PlaybackEngine: ObservableObject {
         return nil
     }
 
-    /// Decodes an entire audio asset via `AVAssetReader` into a PCM buffer,
-    /// then returns the slice starting at `startTime`. Used for compressed
-    /// formats (MP3 / AAC) where `AVAudioFile.length` undercounts frames and
-    /// `scheduleSegment` would clip the tail by encoder priming + padding.
-    ///
-    /// Decoding is synchronous on the calling thread. For a 100 s stereo
-    /// file at 48 kHz it allocates ~38 MB and takes a few hundred ms; the
-    /// buffer is held by the cue and freed when the cue tears down.
+    /// Wrapper around `decodeFullAssetBuffer` + `sliceBufferFromFrame` that
+    /// returns the [startTime, end] slice ready to schedule on a player node.
     private func decodeAssetSlice(url: URL,
                                   processingFormat: AVAudioFormat,
                                   startTime: Double,
                                   assetDuration: Double) -> AVAudioPCMBuffer? {
-        let asset = AVURLAsset(url: url)
-        guard let audioTrack = asset.tracks(withMediaType: .audio).first else {
-            debugLog("[ENGINE] decodeAssetSlice: no audio track in \(url.lastPathComponent)")
+        guard let full = decodeFullAssetBuffer(url: url,
+                                               processingFormat: processingFormat) else {
             return nil
         }
-
-        let reader: AVAssetReader
-        do {
-            reader = try AVAssetReader(asset: asset)
-        } catch {
-            debugLog("[ENGINE] decodeAssetSlice: AVAssetReader init failed: \(error)")
-            return nil
-        }
-
-        // Decode as interleaved float32 — CMSampleBuffer's block buffer is
-        // one contiguous interleaved span we can read straight through.
-        // We'll deinterleave into the non-interleaved AVAudioPCMBuffer that
-        // matches the engine's processingFormat.
-        let chCount = Int(processingFormat.channelCount)
-        let outputSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: processingFormat.sampleRate,
-            AVNumberOfChannelsKey: chCount,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsNonInterleaved: false,
-            AVLinearPCMIsBigEndianKey: false,
-        ]
-        let trackOutput = AVAssetReaderTrackOutput(track: audioTrack,
-                                                    outputSettings: outputSettings)
-        reader.add(trackOutput)
-        guard reader.startReading() else {
-            debugLog("[ENGINE] decodeAssetSlice: startReading failed: \(reader.error?.localizedDescription ?? "?")")
-            return nil
-        }
-
-        // Capacity = asset duration × sample rate + 5 % headroom for encoder
-        // padding the reader may emit beyond the nominal duration.
-        let estCap = AVAudioFrameCount((assetDuration * processingFormat.sampleRate * 1.05).rounded(.up))
-        guard estCap > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: processingFormat,
-                                            frameCapacity: estCap) else {
-            debugLog("[ENGINE] decodeAssetSlice: PCM buffer alloc failed (cap=\(estCap))")
-            return nil
-        }
-
-        var totalFrames: AVAudioFrameCount = 0
-        while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
-            let frames = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
-            guard frames > 0,
-                  let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
-
-            // Stop cleanly if the reader handed us more frames than capacity.
-            // Should be rare given the 5 % headroom, but better than overwriting.
-            if totalFrames + frames > buffer.frameCapacity {
-                debugLog("[ENGINE] decodeAssetSlice: capacity exceeded at \(totalFrames + frames) (cap=\(buffer.frameCapacity)); truncating")
-                break
-            }
-
-            var dataPtr: UnsafeMutablePointer<Int8>?
-            let status = CMBlockBufferGetDataPointer(blockBuffer,
-                                                     atOffset: 0,
-                                                     lengthAtOffsetOut: nil,
-                                                     totalLengthOut: nil,
-                                                     dataPointerOut: &dataPtr)
-            guard status == kCMBlockBufferNoErr, let dataPtr = dataPtr else { continue }
-
-            let interleaved = dataPtr.withMemoryRebound(to: Float.self,
-                                                        capacity: Int(frames) * chCount) { $0 }
-            // Deinterleave into the per-channel pointers of `buffer`.
-            guard let channelData = buffer.floatChannelData else { continue }
-            let dstOffset = Int(totalFrames)
-            for c in 0..<chCount {
-                let dst = channelData[c].advanced(by: dstOffset)
-                for f in 0..<Int(frames) {
-                    dst[f] = interleaved[f * chCount + c]
-                }
-            }
-            totalFrames += frames
-        }
-
-        if reader.status == .failed {
-            debugLog("[ENGINE] decodeAssetSlice: read failed: \(reader.error?.localizedDescription ?? "?")")
-            return nil
-        }
-        buffer.frameLength = totalFrames
-
-        // Slice from startTime onward. For startTime == 0 we'd return `buffer`
-        // directly, but slicing keeps memory tidy (the unused head is freed).
         let startFrame = Int(startTime * processingFormat.sampleRate)
-        guard startFrame < Int(totalFrames) else { return nil }
-        if startFrame == 0 { return buffer }
-
-        let sliceFrames = AVAudioFrameCount(Int(totalFrames) - startFrame)
-        guard let slice = AVAudioPCMBuffer(pcmFormat: processingFormat,
-                                           frameCapacity: sliceFrames) else {
-            return buffer  // fallback: just return the full buffer
-        }
-        if let srcCh = buffer.floatChannelData, let dstCh = slice.floatChannelData {
-            for c in 0..<chCount {
-                memcpy(dstCh[c],
-                       srcCh[c].advanced(by: startFrame),
-                       Int(sliceFrames) * MemoryLayout<Float>.size)
-            }
-        }
-        slice.frameLength = sliceFrames
-        return slice
+        return sliceBufferFromFrame(full, startFrame: startFrame)
     }
 
     /// Reads a [startFrame, endTime] segment from `file` into a PCM buffer for loop scheduling.

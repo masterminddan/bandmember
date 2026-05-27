@@ -103,7 +103,7 @@ final class LyricsEditorModel: ObservableObject {
     let beats: [Double]
     let duration: Double
 
-    private var player: AVAudioPlayer?
+    private var player: EditorAudioPlayer?
     private var timer: Timer?
 
     /// Snapshot of neighbor state captured at drag start. Used by
@@ -138,8 +138,12 @@ final class LyricsEditorModel: ObservableObject {
         self.beats = beats
 
         let url = URL(fileURLWithPath: filePath)
-        let p = try? AVAudioPlayer(contentsOf: url)
-        p?.prepareToPlay()
+        // EditorAudioPlayer routes through AVAudioEngine so it honors the
+        // user's chosen output device — matches main-playlist behavior, so
+        // switching devices in the menu re-routes the editor too. Falls back
+        // to nil if the file can't be opened; the rest of the editor handles
+        // that the same way it did with `AVAudioPlayer`.
+        let p = EditorAudioPlayer(url: url)
         self.player = p
         self.duration = p?.duration ?? 0
 

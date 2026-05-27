@@ -84,30 +84,17 @@ struct BandMemberApp: App {
             }
 
             CommandMenu("Audio") {
-                Menu("Output Device") {
-                    // "System Default" gets a checkmark only when the user
-                    // hasn't pinned a specific device.
-                    Button(action: { audioOut.currentUID = nil }) {
-                        if audioOut.currentUID == nil {
-                            Label("System Default", systemImage: "checkmark")
-                        } else {
-                            Text("System Default")
-                        }
-                    }
+                // Inline picker renders native macOS checkmarks for the
+                // selected device automatically. Selecting "System Default"
+                // unpins (`currentUID = nil`); selecting a named device
+                // pins to it. PlaybackEngine subscribes to currentUID
+                // changes and re-routes its output AU accordingly.
+                Picker("Output Device", selection: $audioOut.currentUID) {
+                    Text("System Default").tag(String?.none)
                     Divider()
-                    // Every device gets a checkmark when it's the *resolved*
-                    // current device — so "System Default" mode still shows
-                    // you which physical box is actually receiving audio.
-                    let resolvedUID = audioOut.currentDevice?.uid
                     ForEach(audioOut.devices) { dev in
-                        Button(action: { audioOut.currentUID = dev.uid }) {
-                            let label = "\(dev.name) — \(dev.channelCount) ch"
-                            if dev.uid == resolvedUID {
-                                Label(label, systemImage: "checkmark")
-                            } else {
-                                Text(label)
-                            }
-                        }
+                        Text("\(dev.name) — \(dev.channelCount) ch")
+                            .tag(String?.some(dev.uid))
                     }
                 }
                 Divider()

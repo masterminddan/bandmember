@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
 
 private let allowedExtensions: Set<String> = ["mp3", "aif", "aiff", "mp4", "mov"]
@@ -7,8 +8,41 @@ struct PlaylistTableView: View {
     @EnvironmentObject var store: PlaylistStore
     @EnvironmentObject var playbackEngine: PlaybackEngine
 
+    /// SwiftUI's `List(selection: Set<ID>)` virtualizes off-screen rows.
+    /// When a selected row scrolls out of view its row body is destroyed,
+    /// but the binding keeps the ID — and a plain single-click elsewhere
+    /// arrives as a binding update that *includes* the phantom off-screen
+    /// ID, so the selection accumulates instead of being replaced. This
+    /// wrapper detects that case (binding wants multi-select but neither
+    /// Cmd nor Shift is held) and collapses to just the newly-added row.
+    private var selectionBinding: Binding<Set<UUID>> {
+        Binding(
+            get: { store.selectedIDs },
+            set: { newValue in
+                let mods = NSEvent.modifierFlags
+                let intentionalMulti =
+                    mods.contains(.command) || mods.contains(.shift)
+                if intentionalMulti || newValue.count <= 1 {
+                    store.selectedIDs = newValue
+                    return
+                }
+                // Pick the freshly-added ID (the actual click target) and
+                // drop everything else. Falls back to any one ID if the
+                // diff is empty (degenerate states like reordering).
+                let added = newValue.subtracting(store.selectedIDs)
+                if let one = added.first {
+                    store.selectedIDs = [one]
+                } else if let any = newValue.first {
+                    store.selectedIDs = [any]
+                } else {
+                    store.selectedIDs = []
+                }
+            }
+        )
+    }
+
     var body: some View {
-        List(selection: $store.selectedIDs) {
+        List(selection: selectionBinding) {
             ForEach(Array(store.items.enumerated()), id: \.element.id) { index, item in
                 PlaylistRowView(
                     item: item,
