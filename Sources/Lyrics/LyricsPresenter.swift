@@ -53,6 +53,10 @@ final class LyricsPresenter {
         window.hasShadow = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.contentView = hosting
+        // Overlay that hides the mouse pointer while it's over the lyrics.
+        let cursorHider = CursorHidingView(frame: hosting.bounds)
+        cursorHider.autoresizingMask = [.width, .height]
+        hosting.addSubview(cursorHider)
         window.setFrame(screen.frame, display: true)
         window.orderFrontRegardless()
 
@@ -295,13 +299,13 @@ private struct LyricsDisplayView: View {
         return anchor - consumed
     }
 
-    /// Current line renders in full white; the upcoming line is dimmer.
+    /// Current line renders in yellow; the upcoming line is dimmer white.
     /// `Text` wraps naturally at the row's fixed width, so lines longer than
     /// one screen width flow to multiple visual rows.
     /// The parent's 0.45s animation governs line transitions as a rigid body.
     private func lineView(_ seg: LyricSegment, at i: Int) -> some View {
         let isCurrent = (i == state.topIndex)
-        let color: Color = isCurrent ? .white : .white.opacity(0.55)
+        let color: Color = isCurrent ? .yellow : .white.opacity(0.55)
         return Text(seg.text)
             .font(lineFont)
             .foregroundColor(color)

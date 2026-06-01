@@ -841,6 +841,11 @@ class PlaybackEngine: ObservableObject {
         contentView.layer?.addSublayer(playerLayer)
         playerLayer.frame = contentView.bounds
 
+        // Overlay that hides the mouse pointer while it's over the video.
+        let cursorHider = CursorHidingView(frame: contentView.bounds)
+        cursorHider.autoresizingMask = [.width, .height]
+        contentView.addSubview(cursorHider)
+
         window.contentView = contentView
         window.setFrame(screen.frame, display: true)
         window.orderFrontRegardless()
