@@ -33,6 +33,17 @@ final class AudioOutputManager: ObservableObject {
         }
     }
 
+    /// Fires whenever the *resolved* output device changes — including hot
+    /// plug/unplug events that flip the resolved device without the user's
+    /// explicit `currentUID` selection changing (e.g. unplugging headphones
+    /// while following the system default, or while pinned to a device that
+    /// just disappeared and fell back to default). `currentUID` does not move
+    /// in those cases, so subscribing to `$currentUID` alone misses them.
+    /// `PlaybackEngine` subscribes here to tear down and rebuild the engine
+    /// on the new device, otherwise its output AudioUnit keeps pointing at a
+    /// device that's no longer there and playback is silent.
+    let resolvedDeviceChanged = PassthroughSubject<Void, Never>()
+
     private let kCurrentUIDKey = "audioOutputDeviceUID"
     private var deviceListListener: AudioObjectPropertyListenerBlock?
     private var defaultDeviceListener: AudioObjectPropertyListenerBlock?
@@ -115,15 +126,17 @@ final class AudioOutputManager: ObservableObject {
         self.devices = result
         ensureMappingForCurrent()
 
-        // If the resolved current device changed (e.g. headphones plugged in
+        // If the resolved current device changed (e.g. headphones unplugged
         // and macOS flipped its system default while our persisted device is
-        // missing), log it. The engine doesn't yet react to this, but the
-        // log line tells us when a silent-play bug coincides with a swap.
+        // missing), notify the engine so it re-targets its output AudioUnit
+        // at the new device. Without this the engine keeps driving a device
+        // that's gone and the next play() is silent.
         if let dev = currentDevice {
             if dev.id != lastResolvedDeviceID || dev.uid != lastResolvedDeviceUID {
                 debugLog("[AOM] device-list refresh: resolved device changed → \(dev.name) (id=\(dev.id), uid=\(dev.uid), \(dev.channelCount) ch)")
                 lastResolvedDeviceID = dev.id
                 lastResolvedDeviceUID = dev.uid
+                resolvedDeviceChanged.send()
             }
         }
     }

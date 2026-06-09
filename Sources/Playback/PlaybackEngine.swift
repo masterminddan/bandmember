@@ -38,9 +38,12 @@ class PlaybackEngine: ObservableObject {
     /// and to size each cue's `ChannelGainAU` output.
     private var currentChannelCount: Int = 2
 
-    /// Subscription that watches the user's chosen output device and swaps
-    /// it on the engine when it changes.
+    /// Subscriptions that watch the output device and swap it on the engine
+    /// when it changes — either the user's explicit selection (`$currentUID`)
+    /// or a hot plug/unplug that flips the *resolved* device underneath an
+    /// unchanged selection (`resolvedDeviceChanged`).
     private var deviceCancellable: AnyCancellable?
+    private var resolvedDeviceCancellable: AnyCancellable?
 
     /// Last wall-clock second the limiter tap logged its RMS reading. Used
     /// to bucket the 30-100 tap callbacks/sec down to one log line per
@@ -75,6 +78,14 @@ class PlaybackEngine: ObservableObject {
             .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.handleDeviceChange() }
+
+        // Hot plug/unplug: the resolved device can change without the user's
+        // selection moving (unplugging headphones falls back to the built-in
+        // speakers). Rebuild the engine on those too, or the output AU stays
+        // bound to the vanished device and playback goes silent.
+        resolvedDeviceCancellable = AudioOutputManager.shared.resolvedDeviceChanged
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.handleDeviceChange() }
     }
 
     private func handleDeviceChange() {
