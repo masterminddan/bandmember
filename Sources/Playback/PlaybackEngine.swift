@@ -342,6 +342,15 @@ class PlaybackEngine: ObservableObject {
                 // Final step: actually stop everything
                 if step == steps {
                     self.stopAll()
+                    // Leave the engine warm. stopAll() calls audioEngine.stop();
+                    // without re-warming, the *next* play() cold-restarts the
+                    // engine and has to sync-start its player nodes against a
+                    // freshly restarted render clock whose sampleTime isn't
+                    // reset cleanly (see currentTime(for:)). That race can
+                    // silently drop one of the synchronized cues — e.g. ESC out
+                    // of a song, then hit a click track and its auto-followed
+                    // "in music" cue never sounds. Mirrors handleDeviceChange().
+                    self.warmUpEngine()
                 }
             }
         }
