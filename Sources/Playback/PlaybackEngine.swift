@@ -45,6 +45,13 @@ class PlaybackEngine: ObservableObject {
     private var deviceCancellable: AnyCancellable?
     private var resolvedDeviceCancellable: AnyCancellable?
 
+    /// Observer for AVAudioEngineConfigurationChange. The engine posts this
+    /// (and stops itself) when the audio hardware changes underneath it —
+    /// including a device idle-sleeping during a quiet stretch, which is how
+    /// the engine silently goes cold between songs. We only log it; the cold
+    /// state is already handled at play time by ensureEngineRunningWithLiveClock().
+    private var configChangeObserver: NSObjectProtocol?
+
     /// Last wall-clock second the limiter tap logged its RMS reading. Used
     /// to bucket the 30-100 tap callbacks/sec down to one log line per
     /// second — enough resolution to spot drops while keeping the log tidy.
@@ -86,6 +93,20 @@ class PlaybackEngine: ObservableObject {
         resolvedDeviceCancellable = AudioOutputManager.shared.resolvedDeviceChanged
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.handleDeviceChange() }
+
+        // Record when the engine is stopped out from under us by a hardware
+        // configuration change (device idle-sleep/wake, sample-rate change).
+        // This is the event that leaves the engine cold between songs; logging
+        // it removes the blind spot that made the dropped-cue bug hard to
+        // trace (the engine silently went cold during an idle gap with no log).
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: audioEngine,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            debugLog("[ENGINE] AVAudioEngineConfigurationChange — engineRunning=\(self.audioEngine.isRunning) activeCues=\(self.audioCues.count) device=\(AudioOutputManager.shared.currentDevice?.name ?? "nil")")
+        }
     }
 
     private func handleDeviceChange() {
@@ -290,7 +311,12 @@ class PlaybackEngine: ObservableObject {
     }
     #endif
 
-    deinit { stopAll() }
+    deinit {
+        if let obs = configChangeObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        stopAll()
+    }
 
     // ══════════════════════════════════════════════════════════════════
     // MARK: - Public API
@@ -341,6 +367,7 @@ class PlaybackEngine: ObservableObject {
             stop(itemID: id)
         }
         LyricsPresenter.hideAll()
+        debugLog("[ENGINE] stopAll → audioEngine.stop() (app-initiated)")
         audioEngine.stop()
     }
 
