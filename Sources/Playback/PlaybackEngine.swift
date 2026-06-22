@@ -111,6 +111,56 @@ class PlaybackEngine: ObservableObject {
         }
     }
 
+    /// Guarantees the engine is running with a *live* render clock before we
+    /// sync-start cues.
+    ///
+    /// A freshly cold-started AVAudioEngine reports an output render clock
+    /// whose sampleTime hasn't begun advancing yet. Scheduling player nodes
+    /// with `play(at:)` against that not-yet-ticking clock intermittently
+    /// drops a cue entirely — the node's start sample-time has already passed
+    /// by the time the IO proc spins up, and the buffer is silently skipped.
+    /// This is the "selected a song, only the lyrics played, no audio" bug:
+    /// the engine had gone cold during an idle period (USB device idle-sleep
+    /// posts an AVAudioEngineConfigurationChange that stops the engine), so
+    /// the next play cold-started and raced its own render clock.
+    ///
+    /// When the engine is already warm this is a no-op. When we have to start
+    /// it, we spin — bounded — until the render clock is valid and has
+    /// actually advanced, so the subsequent `play(at:)` lands on a stable
+    /// timeline. The IO proc runs on CoreAudio's own thread, so blocking this
+    /// (main) thread briefly does not stop the clock from ticking; it just
+    /// makes us wait for it. Typical settle is a few ms; the 0.25 s ceiling
+    /// only trips if the device is pathologically slow to wake, in which case
+    /// we fall through and let the caller's nil-clock path play immediately.
+    private func ensureEngineRunningWithLiveClock() {
+        guard !audioEngine.isRunning else {
+            debugLog("[ENGINE] engine already running (warm), reusing")
+            return
+        }
+        do {
+            try audioEngine.start()
+        } catch {
+            debugLog("[ENGINE] Failed to start audio engine: \(error)")
+            return
+        }
+
+        let outputNode = audioEngine.outputNode
+        var firstSample: AVAudioFramePosition?
+        let deadline = Date().addingTimeInterval(0.25)
+        while Date() < deadline {
+            if let t = outputNode.lastRenderTime, t.isSampleTimeValid {
+                if let first = firstSample {
+                    if t.sampleTime > first { break }   // clock is ticking
+                } else {
+                    firstSample = t.sampleTime          // got a baseline
+                }
+            }
+            usleep(2000)  // 2 ms
+        }
+        let settledStr = firstSample.map { _ in "clock live" } ?? "clock never reported"
+        debugLog("[ENGINE] cold-started in play; \(settledStr)")
+    }
+
     /// Pushes the user's currently selected device down to the engine's
     /// output AudioUnit. Safe to call repeatedly; defers to system default
     /// when no choice is set or the chosen device is missing.
@@ -441,16 +491,12 @@ class PlaybackEngine: ObservableObject {
             }
         }
 
-        // Start audio engine if needed
-        if !audioItems.isEmpty && !audioEngine.isRunning {
-            do {
-                try audioEngine.start()
-                debugLog("[ENGINE] Audio engine started")
-            } catch {
-                debugLog("[ENGINE] Failed to start audio engine: \(error)")
-            }
-        } else if !audioItems.isEmpty {
-            debugLog("[ENGINE] Audio engine already running (isRunning=true), reusing")
+        // Make sure the engine is up with a stable render clock before we
+        // sync-start cues. Cold-starting it and immediately scheduling against
+        // the fresh clock intermittently drops a cue — silent playback. See
+        // ensureEngineRunningWithLiveClock().
+        if !audioItems.isEmpty {
+            ensureEngineRunningWithLiveClock()
         }
 
         // Mark all as playing
