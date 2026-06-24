@@ -659,17 +659,29 @@ class PlaybackEngine: ObservableObject {
                             segmentBuffer.frameLength,
                             Double(segmentBuffer.frameLength) / sampleRate,
                             sampleRate, fileLengthSeconds, assetDuration))
-            playerNode.scheduleBuffer(segmentBuffer, at: nil, options: [], completionHandler: { [weak self] in
+            playerNode.scheduleBuffer(segmentBuffer, at: nil, options: [],
+                                      completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                // .dataPlayedBack (not the default .dataConsumed): fire only
+                // after the frames have actually been rendered out, so we don't
+                // stop the node while the sample-rate converter / hardware
+                // buffers still hold the tail (which chops the last fraction of
+                // a second when file SR != device SR — e.g. 44.1k file on 48k).
                 DispatchQueue.main.async {
                     self?.audioDidFinishNaturally(itemID: item.id)
                 }
-            })
+            }
         } else {
             // PCM / WAV / AIFF path (and fallback if full decode failed):
             // AVAudioFile.length matches the asset exactly.
             let remainingFrames = AVAudioFrameCount(file.length - startFrame)
             playerNode.scheduleSegment(file, startingFrame: startFrame,
-                                       frameCount: remainingFrames, at: nil) { [weak self] in
+                                       frameCount: remainingFrames, at: nil,
+                                       completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                // .dataPlayedBack (not the default .dataConsumed): fire only
+                // after the frames have actually been rendered out, so we don't
+                // stop the node while the sample-rate converter / hardware
+                // buffers still hold the tail (which chops the last fraction of
+                // a second when file SR != device SR — e.g. 44.1k file on 48k).
                 DispatchQueue.main.async {
                     self?.audioDidFinishNaturally(itemID: item.id)
                 }
