@@ -372,18 +372,6 @@ struct ItemInspectorView: View {
 
                 tempoLabel(for: id)
 
-                HStack {
-                    Text("Type").font(.caption).foregroundColor(.secondary)
-                    Spacer()
-                    if let item = store.items[safe: index] {
-                        HStack(spacing: 4) {
-                            Image(systemName: item.mediaType.icon)
-                            Text(item.mediaType.rawValue.capitalized)
-                        }
-                        .font(.callout)
-                    }
-                }
-
                 // Target display (video only — audio uses this field via Lyrics tab)
                 if store.items[safe: index]?.mediaType == .video {
                     VStack(alignment: .leading, spacing: 4) {
@@ -404,56 +392,6 @@ struct ItemInspectorView: View {
                             Text("2nd display not connected — video will not play")
                                 .font(.caption2).foregroundColor(.orange)
                         }
-                    }
-                }
-
-                Divider()
-
-                ColorTagPicker(
-                    value: store.items[safe: index]?.colorTag ?? .none,
-                    onChange: { newTag in
-                        guard index < store.items.count else { return }
-                        store.pushUndo()
-                        store.items[index].colorTag = newTag
-                    }
-                )
-
-                Divider()
-
-                Toggle(isOn: Binding(
-                    get: { store.items[safe: index]?.autoFollow ?? false },
-                    set: { newValue in
-                        guard index < store.items.count else { return }
-                        store.pushUndo()
-                        store.items[index].autoFollow = newValue
-                    }
-                )) {
-                    VStack(alignment: .leading) {
-                        Text("Also play next")
-                        Text("Simultaneously triggers the next item when this one is played")
-                            .font(.caption).foregroundColor(.secondary)
-                    }
-                }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Output").font(.headline)
-                    GlobalOutputDevicePicker()
-                    let currentBusID = store.items[safe: index]?.outputRouting.busID
-                    BusPicker(
-                        currentBusID: currentBusID,
-                        onSelect: { newBusID in
-                            guard index < store.items.count else { return }
-                            store.pushUndo()
-                            store.items[index].outputRouting = OutputRouting(busID: newBusID)
-                            playbackEngine.updateVolume(for: store.items[index])
-                        },
-                        onEdit: { showMappingEditor = true }
-                    )
-                    if let id = currentBusID, isMonoSumOnCurrentDevice(busID: id) {
-                        Text("L+R are summed (-3 dB) and sent to a single channel on this device. Use this when one interface output feeds IEMs and the other feeds FOH.")
-                            .font(.caption2).foregroundColor(.secondary)
                     }
                 }
 
@@ -486,6 +424,39 @@ struct ItemInspectorView: View {
                         }
                     ), onEditStart: { store.pushUndo() })
                 }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Output").font(.headline)
+                    GlobalOutputDevicePicker()
+                    let currentBusID = store.items[safe: index]?.outputRouting.busID
+                    BusPicker(
+                        currentBusID: currentBusID,
+                        onSelect: { newBusID in
+                            guard index < store.items.count else { return }
+                            store.pushUndo()
+                            store.items[index].outputRouting = OutputRouting(busID: newBusID)
+                            playbackEngine.updateVolume(for: store.items[index])
+                        },
+                        onEdit: { showMappingEditor = true }
+                    )
+                    if let id = currentBusID, isMonoSumOnCurrentDevice(busID: id) {
+                        Text("L+R are summed (-3 dB) and sent to a single channel on this device. Use this when one interface output feeds IEMs and the other feeds FOH.")
+                            .font(.caption2).foregroundColor(.secondary)
+                    }
+                }
+
+                Divider()
+
+                ColorTagPicker(
+                    value: store.items[safe: index]?.colorTag ?? .none,
+                    onChange: { newTag in
+                        guard index < store.items.count else { return }
+                        store.pushUndo()
+                        store.items[index].colorTag = newTag
+                    }
+                )
 
                 Spacer()
             }
@@ -562,7 +533,7 @@ struct ColorTagPicker: View {
 struct VolumeSlider: View {
     let label: String
     @Binding var value: Float
-    var maxValue: Float = 2.0
+    var maxValue: Float = 4.0
     var onEditStart: (() -> Void)? = nil
     /// When non-nil, replaces the right-hand percentage label and renders
     /// the slider in a "neutral" appearance — used in multi-select to mean

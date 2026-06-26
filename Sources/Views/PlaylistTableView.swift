@@ -174,11 +174,10 @@ struct PlaylistRowView: View {
                     .help("File not found: \(item.filePath)")
             }
 
-            // Volume indicator
-            Image(systemName: volumeIcon)
+            // Play-next label (refers to the checkbox beside it)
+            Text("Play next")
                 .foregroundColor(.secondary)
                 .font(.caption)
-                .frame(width: 16)
 
             // Auto-follow checkbox
             Toggle("", isOn: Binding(
@@ -196,18 +195,6 @@ struct PlaylistRowView: View {
         }
         .padding(.vertical, 2)
         .opacity(item.fileExists ? 1.0 : 0.5)
-    }
-
-    private var volumeIcon: String {
-        if item.masterVolume == 0 {
-            return "speaker.slash"
-        } else if item.masterVolume < 0.33 {
-            return "speaker"
-        } else if item.masterVolume < 0.66 {
-            return "speaker.wave.1"
-        } else {
-            return "speaker.wave.2"
-        }
     }
 }
 
