@@ -15,14 +15,7 @@ enum MediaType: String, Codable, CaseIterable {
 
     static func detect(from url: URL) -> MediaType {
         let ext = url.pathExtension.lowercased()
-        switch ext {
-        case "mp3", "aif", "aiff":
-            return .audio
-        case "mp4", "mov":
-            return .video
-        default:
-            return .audio
-        }
+        return MediaFileTypes.videoExtensions.contains(ext) ? .video : .audio
     }
 }
 

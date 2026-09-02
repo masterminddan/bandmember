@@ -148,7 +148,7 @@ struct BandMemberApp: App {
         panel.allowsMultipleSelection = true
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.mp3, .aiff, .mpeg4Movie, .quickTimeMovie]
+        panel.allowedContentTypes = MediaFileTypes.contentTypes
 
         if panel.runModal() == .OK {
             store.addItems(urls: panel.urls)

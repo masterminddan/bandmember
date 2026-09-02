@@ -2,11 +2,12 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-private let allowedExtensions: Set<String> = ["mp3", "aif", "aiff", "mp4", "mov"]
-
 struct PlaylistTableView: View {
     @EnvironmentObject var store: PlaylistStore
     @EnvironmentObject var playbackEngine: PlaybackEngine
+
+    /// Highlights the list while a droppable file hovers over it.
+    @State private var isDropTargeted = false
 
     /// SwiftUI's `List(selection: Set<ID>)` virtualizes off-screen rows.
     /// When a selected row scrolls out of view its row body is destroyed,
@@ -79,13 +80,56 @@ struct PlaylistTableView: View {
             }
             store.deleteSelected()
         }
-        .background {
-            DropReceiverView { urls in
-                let valid = urls.filter { allowedExtensions.contains($0.pathExtension.lowercased()) }
-                if !valid.isEmpty {
-                    store.addItems(urls: valid)
-                }
+        // Dropping audio/video files anywhere in the playlist appends them
+        // as cues.
+        //
+        // Deliberately NOT `ForEach.onInsert`: that registers the underlying
+        // `ListCoreTableView` for `public.file-url`, which then wins the
+        // AppKit dragging-destination search (it's the view under the cursor)
+        // and rejects every drop that doesn't land exactly on an inter-row
+        // insertion point — the drag just springs back to the Finder. With
+        // the table unregistered, the search walks up to SwiftUI's own
+        // dragging-destination view, which is what backs this modifier.
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            loadDroppedURLs(providers) { urls in
+                store.addItems(urls: urls)
             }
+            return true
+        }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    /// Resolves dropped item providers to supported media URLs, preserving the
+    /// order they were dropped in. `completion` runs on the main queue and is
+    /// skipped entirely when nothing in the drop is playable.
+    private func loadDroppedURLs(_ providers: [NSItemProvider],
+                                 completion: @escaping ([URL]) -> Void) {
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var resolved: [Int: URL] = [:]
+
+        for (offset, provider) in providers.enumerated() {
+            guard provider.canLoadObject(ofClass: URL.self) else { continue }
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                defer { group.leave() }
+                guard let url, MediaFileTypes.isSupported(url) else { return }
+                lock.lock()
+                resolved[offset] = url
+                lock.unlock()
+            }
+        }
+
+        group.notify(queue: .main) {
+            let urls = resolved.keys.sorted().compactMap { resolved[$0] }
+            guard !urls.isEmpty else { return }
+            completion(urls)
         }
     }
 
@@ -195,55 +239,5 @@ struct PlaylistRowView: View {
         }
         .padding(.vertical, 2)
         .opacity(item.fileExists ? 1.0 : 0.5)
-    }
-}
-
-// MARK: - AppKit Drop Receiver
-
-struct DropReceiverView: NSViewRepresentable {
-    var onDrop: ([URL]) -> Void
-
-    func makeNSView(context: Context) -> DropNSView {
-        let view = DropNSView()
-        view.onDrop = onDrop
-        view.registerForDraggedTypes([.fileURL])
-        return view
-    }
-
-    func updateNSView(_ nsView: DropNSView, context: Context) {
-        nsView.onDrop = onDrop
-    }
-}
-
-class DropNSView: NSView {
-    var onDrop: (([URL]) -> Void)?
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if hasValidFiles(sender) { return .copy }
-        return []
-    }
-
-    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if hasValidFiles(sender) { return .copy }
-        return []
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let urls = fileURLs(from: sender), !urls.isEmpty else { return false }
-        onDrop?(urls)
-        return true
-    }
-
-    private func hasValidFiles(_ info: NSDraggingInfo) -> Bool {
-        guard let urls = fileURLs(from: info) else { return false }
-        return !urls.isEmpty
-    }
-
-    private func fileURLs(from info: NSDraggingInfo) -> [URL]? {
-        let pasteboard = info.draggingPasteboard
-        guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [
-            .urlReadingFileURLsOnly: true
-        ]) as? [URL] else { return nil }
-        return urls.filter { allowedExtensions.contains($0.pathExtension.lowercased()) }
     }
 }

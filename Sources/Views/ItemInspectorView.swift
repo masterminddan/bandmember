@@ -336,9 +336,7 @@ struct ItemInspectorView: View {
                     filePath: store.items[safe: index]?.filePath ?? "",
                     onDrop: { url in
                         guard index < store.items.count else { return }
-                        let ext = url.pathExtension.lowercased()
-                        let allowed: Set<String> = ["mp3", "aif", "aiff", "mp4", "mov"]
-                        guard allowed.contains(ext) else { return }
+                        guard MediaFileTypes.isSupported(url) else { return }
                         store.pushUndo()
                         store.items[index].filePath = url.path
                         store.items[index].name = url.deletingPathExtension().lastPathComponent
@@ -610,14 +608,13 @@ struct FileDropReceiver: NSViewRepresentable {
 class FileDropNSView: NSView {
     var onDrop: ((URL) -> Void)?
     var onTargetChanged: ((Bool) -> Void)?
-    private static let exts: Set<String> = ["mp3","aif","aiff","mp4","mov"]
     override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation { valid(s) != nil ? (onTargetChanged?(true), .copy).1 : [] }
     override func draggingExited(_ s: NSDraggingInfo?) { onTargetChanged?(false) }
     override func draggingEnded(_ s: NSDraggingInfo) { onTargetChanged?(false) }
     override func performDragOperation(_ s: NSDraggingInfo) -> Bool { onTargetChanged?(false); guard let u = valid(s) else { return false }; onDrop?(u); return true }
     private func valid(_ i: NSDraggingInfo) -> URL? {
         guard let urls = i.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], let u = urls.first else { return nil }
-        return Self.exts.contains(u.pathExtension.lowercased()) ? u : nil
+        return MediaFileTypes.isSupported(u) ? u : nil
     }
 }
 
