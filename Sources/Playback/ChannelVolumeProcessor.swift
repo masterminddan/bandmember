@@ -40,7 +40,7 @@ class ChannelVolumeProcessor {
             process: channelTapProcess
         )
 
-        var tap: Unmanaged<MTAudioProcessingTap>?
+        var tap: MTAudioProcessingTap?
         let status = MTAudioProcessingTapCreate(
             kCFAllocatorDefault,
             &callbacks,
@@ -54,7 +54,7 @@ class ChannelVolumeProcessor {
             return false
         }
 
-        inputParams.audioTapProcessor = unwrappedTap.takeRetainedValue()
+        inputParams.audioTapProcessor = unwrappedTap
 
         let audioMix = AVMutableAudioMix()
         audioMix.inputParameters = [inputParams]
