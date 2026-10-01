@@ -104,6 +104,8 @@ struct WaveformView: View {
     let masterVolume: Float
     let leftVolume: Float
     let rightVolume: Float
+    /// Boost of the cue's limiter in dB, or nil when the limiter is off.
+    var limiterBoostDB: Float? = nil
     let beats: [Double]
     let snapMode: SnapMode
 
@@ -167,9 +169,12 @@ struct WaveformView: View {
                                 // bus, and stereo-vs-mono-sum placement is
                                 // a per-device decision that doesn't change
                                 // what the cue itself contains.
-                                let topSamples    = wf.leftSamples
+                                // With the limiter on, both sides are
+                                // first run through a preview of it.
+                                let limited       = limiterPreview(wf)
+                                let topSamples    = limited?.left ?? wf.leftSamples
                                 let topGain       = masterVolume * leftVolume
-                                let bottomSamples = wf.rightSamples
+                                let bottomSamples = limited?.right ?? wf.rightSamples
                                 let bottomGain    = masterVolume * rightVolume
                                 let topColor: Color = .blue
                                 let botColor: Color = .orange
@@ -306,6 +311,51 @@ struct WaveformView: View {
 
     private func playheadX(in width: CGFloat) -> CGFloat {
         positionX(startPosition, in: width)
+    }
+
+    /// Approximates the cue's limiter at waveform resolution: boost every
+    /// chunk, turn down the ones that would pass full scale, and let that
+    /// reduction hold and then release across the chunks that follow — the
+    /// same shape `LookaheadLimiter`'s slow envelope gives the real audio.
+    /// Returns nil when the limiter is off.
+    private func limiterPreview(_ wf: WaveformData) -> (left: [Float], right: [Float])? {
+        guard let boostDB = limiterBoostDB, !wf.leftSamples.isEmpty else { return nil }
+        let boost = powf(10, boostDB / 20)
+        let count = min(wf.leftSamples.count, wf.rightSamples.count)
+        let chunkSeconds = wf.duration / Double(count)
+
+        // The limiter listens to each side in proportion to how loud that
+        // side is set, so a side that's turned off can't trigger it.
+        let widest = max(leftVolume, rightVolume)
+        let balanceL = widest > 0 ? leftVolume / widest : 0
+        let balanceR = widest > 0 ? rightVolume / widest : 0
+
+        var left: [Float] = []
+        var right: [Float] = []
+        left.reserveCapacity(count)
+        right.reserveCapacity(count)
+
+        var reductionDB: Float = 0
+        var sinceCharge: Double = 0
+        for i in 0..<count {
+            let level = boost * max(wf.leftSamples[i] * balanceL, wf.rightSamples[i] * balanceR)
+            let need: Float = level > 1 ? 20 * log10f(level) : 0
+            if need >= reductionDB {
+                reductionDB = need
+                sinceCharge = 0
+            } else {
+                let held = max(0, LookaheadLimiter.slowHoldSeconds - sinceCharge)
+                let releasing = max(0, chunkSeconds - held)
+                reductionDB *= Float(exp(-releasing / LookaheadLimiter.slowReleaseSeconds))
+                sinceCharge += chunkSeconds
+                // The chunk's own peak is still held at full scale.
+                reductionDB = max(reductionDB, need)
+            }
+            let gain = boost * powf(10, -reductionDB / 20)
+            left.append(wf.leftSamples[i] * gain)
+            right.append(wf.rightSamples[i] * gain)
+        }
+        return (left, right)
     }
 
     private func snapToNearestBeat(_ time: Double) -> Double {

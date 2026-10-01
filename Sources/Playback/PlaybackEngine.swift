@@ -12,15 +12,17 @@ class PlaybackEngine: ObservableObject {
     // ── Audio engine (shared by all audio cues) ──────────────────────
     private let audioEngine = AVAudioEngine()
     /// Brick-wall safety limiter inserted between mainMixerNode and outputNode.
-    /// Catches inter-sample peaks introduced by mono-summing or by users pushing
-    /// per-cue volume above unity, so FOH never sees a clipped signal.
+    /// Each cue limits itself inside its `ChannelGainAU`, so this only acts
+    /// when several cues add up past full scale on one output — and then only
+    /// on that output channel, so FOH never sees a clipped signal and never
+    /// gets pumped by something that's happening in the IEMs.
     private var outputLimiter: AVAudioUnitEffect?
 
     struct AudioCue {
         let playerNode: AVAudioPlayerNode
         let gainUnit: AVAudioUnitEffect
         let gainAU: ChannelGainAU      // raw reference for setting L/R gain
-        let mixerNode: AVAudioMixerNode // per-cue master volume
+        let mixerNode: AVAudioMixerNode // unity; ramped down by fadeOutAndStopAll
         let file: AVAudioFile
         let startPosition: Double      // file offset (seconds) where scheduled segment begins
         let loopEndPosition: Double?   // if set & > startPosition, audio loops in [start, end]
@@ -63,15 +65,47 @@ class PlaybackEngine: ObservableObject {
     private var videoEndObservers: [UUID: Any] = [:]
     private var videoLoopObservers: [UUID: Any] = [:]  // boundary-time tokens
 
+    /// Start-up state for a video cue. A video can only be started on an
+    /// exact clock time once its player is ready, parked on the start frame
+    /// and prerolled, and that takes anywhere from ~50 ms to a few hundred —
+    /// so getting ready and being told when to start happen independently,
+    /// and the cue starts as soon as both have happened.
+    private struct VideoStart {
+        /// Position in the file the cue starts from (seconds).
+        let itemTime: Double
+        var statusObservation: NSKeyValueObservation?
+        var preparing = false
+        var prepared = false
+        /// Host-clock time (seconds) at which `itemTime` belongs on screen.
+        /// Nil until the group has been started.
+        var anchorHostSeconds: Double?
+    }
+    private var videoStarts: [UUID: VideoStart] = [:]
+
+    /// Shortest notice a prepared video needs to start on a requested time.
+    private static let videoStartLeadSeconds: Double = 0.03
+    /// With no audio to line up against, how far out a video group is
+    /// started — long enough for the players to get ready first, so the
+    /// videos start together and from their first frame.
+    private static let videoOnlyStartLeadSeconds: Double = 0.2
+    /// How long to wait for a video to get ready before starting it anyway.
+    private static let videoPrepareTimeoutSeconds: Double = 2.0
+
     weak var store: PlaylistStore?
 
     // ── Init ─────────────────────────────────────────────────────────
     init() {
-        // Register the custom channel-gain audio unit once.
+        // Register the custom audio units once.
         AUAudioUnit.registerSubclass(
             ChannelGainAU.self,
             as: channelGainComponentDescription,
             name: "BandMember Channel Gain",
+            version: 1
+        )
+        AUAudioUnit.registerSubclass(
+            SafetyLimiterAU.self,
+            as: safetyLimiterComponentDescription,
+            name: "BandMember Safety Limiter",
             version: 1
         )
         applySelectedOutputDevice()
@@ -212,9 +246,9 @@ class PlaybackEngine: ObservableObject {
         }
     }
 
-    /// Inserts an Apple PeakLimiter between mainMixerNode and outputNode so
-    /// the final bus is brick-walled at ~0 dBFS, regardless of how many
-    /// physical channels the chosen device exposes. AVAudioEngine implicitly
+    /// Inserts a `SafetyLimiterAU` between mainMixerNode and outputNode so
+    /// the final bus is brick-walled at 0 dBFS, one independent limiter per
+    /// physical channel the chosen device exposes. AVAudioEngine implicitly
     /// connects mainMixerNode → outputNode the first time mainMixerNode is
     /// referenced; we tear that down and splice in the limiter, using a
     /// format that matches the device's channel count.
@@ -227,14 +261,7 @@ class PlaybackEngine: ObservableObject {
             outputLimiter = nil
         }
 
-        let desc = AudioComponentDescription(
-            componentType: kAudioUnitType_Effect,
-            componentSubType: kAudioUnitSubType_PeakLimiter,
-            componentManufacturer: kAudioUnitManufacturer_Apple,
-            componentFlags: 0,
-            componentFlagsMask: 0
-        )
-        let limiter = AVAudioUnitEffect(audioComponentDescription: desc)
+        let limiter = AVAudioUnitEffect(audioComponentDescription: safetyLimiterComponentDescription)
         let mainMixer = audioEngine.mainMixerNode  // forces implicit attach + connection
         let output    = audioEngine.outputNode
 
@@ -248,22 +275,18 @@ class PlaybackEngine: ObservableObject {
             let nodeRate = output.outputFormat(forBus: 0).sampleRate
             sampleRate = nodeRate > 0 ? nodeRate : 48000
         }
-        let multiFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                     sampleRate: sampleRate,
-                                     channels: AVAudioChannelCount(currentChannelCount),
-                                     interleaved: false)
+        let multiFmt = discreteAudioFormat(sampleRate: sampleRate,
+                                           channels: currentChannelCount)
+
+        // Size the limiter for the device before it joins the graph.
+        if let safetyAU = limiter.auAudioUnit as? SafetyLimiterAU {
+            try? safetyAU.configure(channelCount: currentChannelCount, sampleRate: sampleRate)
+        }
 
         audioEngine.disconnectNodeOutput(mainMixer)
         audioEngine.attach(limiter)
         audioEngine.connect(mainMixer, to: limiter, format: multiFmt)
         audioEngine.connect(limiter,   to: output,  format: multiFmt)
-
-        // Tighten attack/decay for transient-heavy backing tracks. Pre-gain
-        // stays at 0 dB — loudness is the user's job via per-cue volume.
-        AudioUnitSetParameter(limiter.audioUnit, kLimiterParam_AttackTime,
-                              kAudioUnitScope_Global, 0, 0.005, 0)
-        AudioUnitSetParameter(limiter.audioUnit, kLimiterParam_DecayTime,
-                              kAudioUnitScope_Global, 0, 0.030, 0)
         outputLimiter = limiter
 
         // RMS tap is a developer-only diagnostic — it's the noisiest line in
@@ -458,9 +481,11 @@ class PlaybackEngine: ObservableObject {
 
     func updateVolume(for item: PlaylistItem) {
         if let cue = audioCues[item.id] {
-            cue.mixerNode.volume = item.masterVolume
+            cue.gainAU.masterGain = item.masterVolume
             cue.gainAU.leftGain  = item.leftVolume
             cue.gainAU.rightGain = item.rightVolume
+            cue.gainAU.limiterEnabled = item.limiterEnabled
+            cue.gainAU.limiterBoost   = item.limiterBoostGain
 
             // Bus → channel may have changed under the cue (user picked a
             // different bus, or remapped the bus on this device). Update
@@ -532,10 +557,26 @@ class PlaybackEngine: ObservableObject {
 
         // Start all audio nodes at the exact same sample time
         let preRoll: TimeInterval = 0.1
+        // Host-clock time at which the group's first audio sample is heard;
+        // videos are started against it. Without audio there's nothing to
+        // match, so the videos just get a common start a moment from now.
+        var startHostSeconds = Self.hostSecondsNow() + Self.videoOnlyStartLeadSeconds
         if !audioItems.isEmpty {
             let outputNode = audioEngine.outputNode
             let wallStart = Date().addingTimeInterval(preRoll)
+            // Scheduled samples reach the listener late by the two limiter
+            // look-aheads plus whatever the device itself adds.
+            let outputDelay = (audioItems.first?.cue.gainAU.latency ?? 0)
+                + (outputLimiter?.auAudioUnit.latency ?? 0)
+                + outputNode.presentationLatency
+            startHostSeconds = Self.hostSecondsNow() + outputDelay
             if let nodeTime = outputNode.lastRenderTime, nodeTime.isSampleTimeValid {
+                if nodeTime.isHostTimeValid {
+                    startHostSeconds = CMClockMakeHostTimeFromSystemUnits(nodeTime.hostTime).seconds
+                        + preRoll + outputDelay
+                } else {
+                    startHostSeconds += preRoll
+                }
                 let offsetSamples = AVAudioFramePosition(nodeTime.sampleRate * preRoll)
                 let syncTime = AVAudioTime(sampleTime: nodeTime.sampleTime + offsetSamples,
                                            atRate: nodeTime.sampleRate)
@@ -553,9 +594,12 @@ class PlaybackEngine: ObservableObject {
             }
         }
 
-        // Start video players
-        for (_, player) in videoItems {
-            player.play()
+        // Start video players, locked to the moment the audio is heard.
+        // Any that aren't ready yet start when they are, at the position
+        // the audio has reached by then.
+        for (item, player) in videoItems {
+            videoStarts[item.id]?.anchorHostSeconds = startHostSeconds
+            startVideoIfReady(itemID: item.id, player: player)
         }
 
         debugLog("[ENGINE] All players started")
@@ -566,6 +610,8 @@ class PlaybackEngine: ObservableObject {
     // ══════════════════════════════════════════════════════════════════
 
     /// Builds the audio graph:  PlayerNode → ChannelGainAU → MixerNode → MainMixer
+    /// All of the cue's volume and limiting happens inside the ChannelGainAU;
+    /// the mixer node stays at unity and exists for fade-outs.
     /// If startTime > 0, schedules from that offset. Skips if file is shorter than startTime.
     private func prepareAudioCue(for item: PlaylistItem, startTime: Double = 0, endTime: Double? = nil) -> AudioCue? {
         let file: AVAudioFile
@@ -615,24 +661,25 @@ class PlaybackEngine: ObservableObject {
         }
         let placement = asn ?? .stereo(startChannel: 1)
 
+        gainAU.masterGain = item.masterVolume
         gainAU.leftGain   = item.leftVolume
         gainAU.rightGain  = item.rightVolume
+        gainAU.limiterEnabled = item.limiterEnabled
+        gainAU.limiterBoost   = item.limiterBoostGain
         gainAU.isMonoSum  = placement.isMonoSum
         gainAU.startChannel = Int32(max(0, placement.startChannel - 1))
         gainAU.isMuted    = (asn == nil)
         try? gainAU.setOutputChannelCount(currentChannelCount,
                                           sampleRate: file.processingFormat.sampleRate)
-        mixer.volume     = item.masterVolume
+        mixer.volume     = 1.0
 
         audioEngine.attach(playerNode)
         audioEngine.attach(gainUnit)
         audioEngine.attach(mixer)
 
         let inFmt  = file.processingFormat
-        let outFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                   sampleRate: inFmt.sampleRate,
-                                   channels: AVAudioChannelCount(currentChannelCount),
-                                   interleaved: false)
+        let outFmt = discreteAudioFormat(sampleRate: inFmt.sampleRate,
+                                         channels: currentChannelCount)
         audioEngine.connect(playerNode, to: gainUnit, format: inFmt)
         audioEngine.connect(gainUnit,   to: mixer,    format: outFmt)
         audioEngine.connect(mixer, to: audioEngine.mainMixerNode, format: outFmt)
@@ -660,15 +707,14 @@ class PlaybackEngine: ObservableObject {
                             Double(segmentBuffer.frameLength) / sampleRate,
                             sampleRate, fileLengthSeconds, assetDuration))
             playerNode.scheduleBuffer(segmentBuffer, at: nil, options: [],
-                                      completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                                      completionCallbackType: .dataPlayedBack) { [weak self, weak playerNode] _ in
                 // .dataPlayedBack (not the default .dataConsumed): fire only
                 // after the frames have actually been rendered out, so we don't
                 // stop the node while the sample-rate converter / hardware
                 // buffers still hold the tail (which chops the last fraction of
                 // a second when file SR != device SR — e.g. 44.1k file on 48k).
-                DispatchQueue.main.async {
-                    self?.audioDidFinishNaturally(itemID: item.id)
-                }
+                guard let playerNode = playerNode else { return }
+                self?.cueDidPlayBack(itemID: item.id, playerNode: playerNode)
             }
         } else {
             // PCM / WAV / AIFF path (and fallback if full decode failed):
@@ -676,15 +722,14 @@ class PlaybackEngine: ObservableObject {
             let remainingFrames = AVAudioFrameCount(file.length - startFrame)
             playerNode.scheduleSegment(file, startingFrame: startFrame,
                                        frameCount: remainingFrames, at: nil,
-                                       completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                                       completionCallbackType: .dataPlayedBack) { [weak self, weak playerNode] _ in
                 // .dataPlayedBack (not the default .dataConsumed): fire only
                 // after the frames have actually been rendered out, so we don't
                 // stop the node while the sample-rate converter / hardware
                 // buffers still hold the tail (which chops the last fraction of
                 // a second when file SR != device SR — e.g. 44.1k file on 48k).
-                DispatchQueue.main.async {
-                    self?.audioDidFinishNaturally(itemID: item.id)
-                }
+                guard let playerNode = playerNode else { return }
+                self?.cueDidPlayBack(itemID: item.id, playerNode: playerNode)
             }
         }
 
@@ -706,7 +751,7 @@ class PlaybackEngine: ObservableObject {
             }
         }()
         let mutedStr = (asn == nil) ? " MUTED(no asn for device)" : ""
-        debugLog("[ENGINE] cue \(item.name): bus=\(busName) placement=\(placementStr) startCh0b=\(gainAU.startChannel) isMonoSum=\(gainAU.isMonoSum) isMuted=\(gainAU.isMuted) masterVol=\(item.masterVolume) L=\(item.leftVolume) R=\(item.rightVolume) outChans=\(currentChannelCount)\(mutedStr)")
+        debugLog("[ENGINE] cue \(item.name): bus=\(busName) placement=\(placementStr) startCh0b=\(gainAU.startChannel) isMonoSum=\(gainAU.isMonoSum) isMuted=\(gainAU.isMuted) masterVol=\(item.masterVolume) L=\(item.leftVolume) R=\(item.rightVolume) limiter=\(item.limiterEnabled ? "+\(item.limiterBoostDB)dB" : "off") outChans=\(currentChannelCount)\(mutedStr)")
         return cue
     }
 
@@ -821,6 +866,24 @@ class PlaybackEngine: ObservableObject {
         return buffer.frameLength > 0 ? buffer : nil
     }
 
+    /// How long a finished cue's nodes are kept alive so the end of the file
+    /// can drain out of the limiters' look-ahead delays (5 ms in the cue's
+    /// own limiter, 5 ms in the output limiter) plus a render cycle of slack.
+    private static let tailFlushSeconds: TimeInterval = 0.05
+
+    /// Completion callback for a cue's scheduled audio; called on an
+    /// AVFoundation thread once the player's last frames have been rendered.
+    private func cueDidPlayBack(itemID: UUID, playerNode: AVAudioPlayerNode) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.tailFlushSeconds) { [weak self, weak playerNode] in
+            guard let self = self, let playerNode = playerNode else { return }
+            // Only tear down the cue this callback belongs to. If the item
+            // was stopped or re-triggered in the meantime, `audioCues` holds
+            // a different player (or none) and there's nothing to do.
+            guard self.audioCues[itemID]?.playerNode === playerNode else { return }
+            self.audioDidFinishNaturally(itemID: itemID)
+        }
+    }
+
     /// Called when an audio cue's scheduled segment finishes rendering on
     /// its own (vs. an explicit user stop). Drops the cue from the engine
     /// but intentionally leaves any open lyric presenter running — see the
@@ -851,20 +914,37 @@ class PlaybackEngine: ObservableObject {
         player.automaticallyWaitsToMinimizeStalling = false
         player.volume = item.masterVolume
 
-        // Seek to start position if needed
+        // Check duration — skip if video is shorter than start time
         if startTime > 0 {
             let cmTime = CMTime(seconds: startTime, preferredTimescale: 600)
-            // Check duration — skip if video is shorter than start time
             let duration = player.currentItem?.asset.duration ?? .zero
             if duration != .zero && CMTimeCompare(cmTime, duration) >= 0 {
                 debugLog("[ENGINE] \(item.name) video shorter than start time, skipping")
                 return nil
             }
-            player.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
         }
 
         videoPlayers[item.id] = player
         setupVideoWindow(for: item, player: player)
+
+        // Get the player ready to start on cue: once it reports ready, park
+        // it on the start frame and preroll. See `prepareVideoStart`.
+        videoStarts[item.id] = VideoStart(itemTime: startTime)
+        let itemID = item.id
+        videoStarts[itemID]?.statusObservation = player.observe(\.status, options: [.initial, .new]) { [weak self] player, _ in
+            guard player.status != .unknown else { return }
+            DispatchQueue.main.async { self?.prepareVideoStart(itemID: itemID, player: player) }
+        }
+        // Never leave a video waiting on preparation that isn't going to
+        // finish — after this long, start it with whatever state it's in.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.videoPrepareTimeoutSeconds) { [weak self, weak player] in
+            guard let self = self, let player = player,
+                  self.videoPlayers[itemID] === player,
+                  self.videoStarts[itemID]?.prepared == false else { return }
+            debugLog("[ENGINE] \(item.name) video still not prepared, starting anyway")
+            self.videoStarts[itemID]?.prepared = true
+            self.startVideoIfReady(itemID: itemID, player: player)
+        }
 
         // If looping, install a boundary observer that seeks back to startTime
         // when the playhead reaches endTime. Otherwise stop on natural EOF.
@@ -890,7 +970,72 @@ class PlaybackEngine: ObservableObject {
         return player
     }
 
+    private static func hostSecondsNow() -> Double {
+        CMClockGetTime(CMClockGetHostTimeClock()).seconds
+    }
+
+    /// Parks a ready player on its start frame and prerolls it, after which
+    /// it can be started on an exact host-clock time.
+    private func prepareVideoStart(itemID: UUID, player: AVPlayer) {
+        guard videoPlayers[itemID] === player,
+              let state = videoStarts[itemID], !state.preparing else { return }
+        videoStarts[itemID]?.preparing = true
+
+        guard player.status == .readyToPlay else {
+            // Failed to load. Nothing to line up; let AVPlayer do what it can.
+            debugLog("[ENGINE] video player not ready (status=\(player.status.rawValue)), starting unsynchronized")
+            videoStarts[itemID]?.prepared = true
+            startVideoIfReady(itemID: itemID, player: player)
+            return
+        }
+
+        let start = CMTime(seconds: state.itemTime, preferredTimescale: 600)
+        player.seek(to: start, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak player] _ in
+            DispatchQueue.main.async {
+                guard let self = self, let player = player,
+                      self.videoPlayers[itemID] === player,
+                      player.status == .readyToPlay else { return }
+                player.preroll(atRate: 1.0) { [weak self, weak player] _ in
+                    DispatchQueue.main.async {
+                        guard let self = self, let player = player,
+                              self.videoPlayers[itemID] === player else { return }
+                        self.videoStarts[itemID]?.prepared = true
+                        self.startVideoIfReady(itemID: itemID, player: player)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Starts a video once it is both prepared and has been given its start
+    /// time. If that time is already too close (or past), the video starts
+    /// as soon as it can, from wherever the audio will be by then — it comes
+    /// in a few frames late but in step, rather than on its first frame and
+    /// behind for the whole cue.
+    private func startVideoIfReady(itemID: UUID, player: AVPlayer) {
+        guard videoPlayers[itemID] === player,
+              let state = videoStarts[itemID], state.prepared,
+              let anchor = state.anchorHostSeconds else { return }
+        videoStarts[itemID]?.anchorHostSeconds = nil   // start once
+
+        // A synchronized start is only legal on a ready player.
+        guard player.status == .readyToPlay else {
+            player.play()
+            return
+        }
+        let hostStart = max(anchor, Self.hostSecondsNow() + Self.videoStartLeadSeconds)
+        let itemTime = state.itemTime + (hostStart - anchor)
+        if hostStart > anchor {
+            debugLog(String(format: "[ENGINE] video ready %.0f ms late; joining at %.2fs",
+                            (hostStart - anchor) * 1000, itemTime))
+        }
+        player.setRate(1.0,
+                       time: CMTime(seconds: itemTime, preferredTimescale: 1_000_000),
+                       atHostTime: CMTime(seconds: hostStart, preferredTimescale: 1_000_000_000))
+    }
+
     private func stopVideo(itemID: UUID) {
+        videoStarts.removeValue(forKey: itemID)?.statusObservation?.invalidate()
         let player = videoPlayers[itemID]
         if let token = videoLoopObservers.removeValue(forKey: itemID) {
             player?.removeTimeObserver(token)

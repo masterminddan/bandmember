@@ -8,6 +8,7 @@ A native macOS app for playing synchronized audio and video files in live perfor
 - **Multi-monitor video** - Assign video files to Main Display or 2nd Display; new videos layer on top of existing ones
 - **Auto-follow chains** - Check "play next" to trigger multiple items simultaneously with one spacebar press
 - **Per-channel volume** - Independent master, left, and right channel volume (0-200%) with real-time waveform preview
+- **Per-track limiter** - Every audio track has its own look-ahead limiter, so a track pushed past 100% only squashes itself instead of pumping everything playing alongside it. Switch on a track's Limiter and raise Boost to bring its quiet passages up toward its loud ones (the waveform previews the result). A final safety limiter works on each physical output separately, so an overload in the IEMs never ducks FOH.
 - **Multi-output routing** - Drive any CoreAudio output device (built-in speakers, Focusrite 4i4, etc.) independent of the system default. Cues route to named buses ("FOH", "IEM", "Click"); per-device mappings translate each bus to physical output channels (stereo pair or mono-sum). Switching rigs only requires re-mapping buses on the new device, not editing every cue. Unassigned buses on a device play silent, so the same playlist can sound right at home, in rehearsal, and at the gig.
 - **Waveform viewer** - Visual waveform with draggable playhead, L/R channels shown separately, live playback indicator while a track is playing
 - **Loop points** - Shift-click anywhere on the waveform to set a loop end; playback loops back to the start point when the end is reached
@@ -59,8 +60,10 @@ open build/BandMember.app
 ## Architecture
 
 - **AVAudioEngine** - Shared audio render graph for sample-accurate multi-track sync, driving the user's chosen CoreAudio device at its native sample rate and channel count
-- **AVPlayer** - Per-cue video playback with full-screen borderless windows
-- **ChannelGainAU** - Custom Audio Unit that takes a stereo cue input, applies L/R gain (with optional -3 dB mono sum), and places the result on a specific channel pair (or single channel) of an N-channel output bus, zeroing the rest
+- **AVPlayer** - Per-cue video playback with full-screen borderless windows. Each player is prerolled and then started on the exact clock time the group's audio reaches the output (after limiter look-ahead and device latency), so picture and sound start together
+- **ChannelGainAU** - Custom Audio Unit that takes a stereo cue input, applies master and L/R gain (with optional -3 dB mono sum), limits the cue, and places the result on a specific channel pair (or single channel) of an N-channel output bus, zeroing the rest
+- **LookaheadLimiter** - The limiter itself: 5 ms look-ahead, brick-wall at full scale, with a fast release for stray peaks and a slower hold-and-release for sustained loud passages. Every cue runs through the same look-ahead whether or not it is limiting, so cues stay sample-aligned
+- **SafetyLimiterAU** - Custom Audio Unit on the final output bus with one independent limiter per physical channel, catching whatever several cues add up to on the same output
 - **AudioOutputManager** - Enumerates CoreAudio output devices, tracks the user's selection, and responds to hot-plug
 - **OutputBusStore** - Named buses are persisted at `config/output-buses.json` in this repo (the checkout the app was built from), so the bus IDs that playlists reference follow `git pull` to other machines. Per-device channel assignments stay machine-local at `~/Library/Application Support/BandMember/output-mappings.json` because device UIDs contain hardware serial numbers; map each bus to channels once per machine in the output mappings editor
 - **WhisperKit** - Local on-device speech-to-text for lyric transcription, with CoreML model caching under `~/Library/Application Support/BandMember/`

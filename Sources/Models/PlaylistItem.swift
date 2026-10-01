@@ -89,6 +89,11 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
     var rightVolume: Float = 1.0
     var colorTag: ColorTag = .none
     var outputRouting: OutputRouting = .defaultRouting
+    /// When true, the cue is raised by `limiterBoostDB` and limited back to
+    /// its original peak level before the volume controls — quiet passages
+    /// come up, loud ones stay where they were.
+    var limiterEnabled: Bool = false
+    var limiterBoostDB: Float = PlaylistItem.defaultLimiterBoostDB
     /// When true, a fullscreen lyrics presenter opens on `targetDisplayIndex`
     /// when this item is triggered, showing timed lyrics from any track in
     /// the auto-follow chain.
@@ -105,6 +110,15 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
     enum CodingKeys: String, CodingKey {
         case id, name, filePath, mediaType, targetDisplayIndex, autoFollow
         case masterVolume, leftVolume, rightVolume, colorTag, outputRouting, showLyrics
+        case limiterEnabled, limiterBoostDB
+    }
+
+    static let defaultLimiterBoostDB: Float = 12
+    static let limiterBoostRangeDB: ClosedRange<Float> = 0...30
+
+    /// `limiterBoostDB` as the linear gain the audio unit takes.
+    var limiterBoostGain: Float {
+        powf(10, limiterBoostDB / 20)
     }
 
     var fileURL: URL {
@@ -145,6 +159,8 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
             && lhs.colorTag == rhs.colorTag
             && lhs.outputRouting == rhs.outputRouting
             && lhs.showLyrics == rhs.showLyrics
+            && lhs.limiterEnabled == rhs.limiterEnabled
+            && lhs.limiterBoostDB == rhs.limiterBoostDB
     }
 
     func hash(into hasher: inout Hasher) {
@@ -167,6 +183,9 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         outputRouting = try c.decodeIfPresent(OutputRouting.self, forKey: .outputRouting)
             ?? .defaultRouting
         showLyrics = try c.decodeIfPresent(Bool.self, forKey: .showLyrics) ?? false
+        limiterEnabled = try c.decodeIfPresent(Bool.self, forKey: .limiterEnabled) ?? false
+        limiterBoostDB = try c.decodeIfPresent(Float.self, forKey: .limiterBoostDB)
+            ?? PlaylistItem.defaultLimiterBoostDB
         startPosition = 0.0  // session-only, always starts at 0
         endPosition = nil    // session-only
     }

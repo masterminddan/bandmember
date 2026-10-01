@@ -171,6 +171,30 @@ struct ItemInspectorView: View {
                     multiVolumeSlider(label: "Right",  keyPath: \.rightVolume)
                 }
 
+                // Limiter (applies to the selected audio items)
+                if selectedAudioCount > 0 {
+                    Divider()
+
+                    let commonBoost = multiSelectLimiterBoost
+                    LimiterControl(
+                        isOn: Binding(
+                            get: { multiSelectLimiterEnabled },
+                            set: { newValue in
+                                store.pushUndo()
+                                applyToSelectedAudio { $0.limiterEnabled = newValue }
+                            }
+                        ),
+                        boostDB: Binding(
+                            get: { commonBoost ?? PlaylistItem.defaultLimiterBoostDB },
+                            set: { newValue in
+                                applyToSelectedAudio { $0.limiterBoostDB = newValue }
+                            }
+                        ),
+                        onEditStart: { store.pushUndo() },
+                        mixedLabel: commonBoost == nil ? "Mixed" : nil
+                    )
+                }
+
                 Spacer()
             }
             .padding()
@@ -256,6 +280,39 @@ struct ItemInspectorView: View {
             store.items.first { $0.id == id }?[keyPath: keyPath]
         })
         return vals.count == 1 ? vals.first : nil
+    }
+
+    /// Number of selected items that are audio — the limiter only exists on
+    /// those (video plays through AVPlayer, outside the audio engine).
+    private var selectedAudioCount: Int {
+        store.selectedIDs.filter { id in
+            store.items.first { $0.id == id }?.mediaType == .audio
+        }.count
+    }
+
+    /// Returns true if ALL selected audio items have the limiter on
+    private var multiSelectLimiterEnabled: Bool {
+        store.selectedIDs.allSatisfy { id in
+            guard let item = store.items.first(where: { $0.id == id }),
+                  item.mediaType == .audio else { return true }
+            return item.limiterEnabled
+        }
+    }
+
+    /// Returns the common limiter boost if all selected audio items share one, otherwise nil.
+    private var multiSelectLimiterBoost: Float? {
+        let vals = Set(store.selectedIDs.compactMap { id -> Float? in
+            guard let item = store.items.first(where: { $0.id == id }),
+                  item.mediaType == .audio else { return nil }
+            return item.limiterBoostDB
+        })
+        return vals.count == 1 ? vals.first : nil
+    }
+
+    private func applyToSelectedAudio(_ mutate: (inout PlaylistItem) -> Void) {
+        applyToSelection { item in
+            if item.mediaType == .audio { mutate(&item) }
+        }
     }
 
     private func applyToSelection(_ mutate: (inout PlaylistItem) -> Void) {
@@ -353,6 +410,14 @@ struct ItemInspectorView: View {
         }
     }
 
+    /// Boost for the waveform's limiter preview, or nil when the item's
+    /// limiter is off (or it's a video, which has no limiter).
+    private func limiterPreviewBoost(for index: Int) -> Float? {
+        guard let item = store.items[safe: index],
+              item.mediaType == .audio, item.limiterEnabled else { return nil }
+        return item.limiterBoostDB
+    }
+
     private func nameField(for index: Int) -> some View {
         TextField("Name", text: Binding(
             get: { store.items[safe: index]?.name ?? "" },
@@ -422,6 +487,7 @@ struct ItemInspectorView: View {
                     masterVolume: store.items[safe: index]?.masterVolume ?? 1.0,
                     leftVolume: store.items[safe: index]?.leftVolume ?? 1.0,
                     rightVolume: store.items[safe: index]?.rightVolume ?? 1.0,
+                    limiterBoostDB: limiterPreviewBoost(for: index),
                     beats: tempoBeats(for: id),
                     snapMode: snapMode
                 )
@@ -479,6 +545,33 @@ struct ItemInspectorView: View {
                             playbackEngine.updateVolume(for: store.items[index])
                         }
                     ), onEditStart: { store.pushUndo() })
+                }
+
+                // Limiter (audio only — video plays through AVPlayer)
+                if store.items[safe: index]?.mediaType == .audio {
+                    Divider()
+
+                    LimiterControl(
+                        isOn: Binding(
+                            get: { store.items[safe: index]?.limiterEnabled ?? false },
+                            set: { newValue in
+                                guard index < store.items.count else { return }
+                                store.pushUndo()
+                                store.items[index].limiterEnabled = newValue
+                                playbackEngine.updateVolume(for: store.items[index])
+                            }
+                        ),
+                        boostDB: Binding(
+                            get: { store.items[safe: index]?.limiterBoostDB
+                                    ?? PlaylistItem.defaultLimiterBoostDB },
+                            set: { newValue in
+                                guard index < store.items.count else { return }
+                                store.items[index].limiterBoostDB = newValue
+                                playbackEngine.updateVolume(for: store.items[index])
+                            }
+                        ),
+                        onEditStart: { store.pushUndo() }
+                    )
                 }
 
                 Divider()
@@ -617,6 +710,57 @@ struct VolumeSlider: View {
                     .font(.system(.caption, design: .monospaced))
                     .foregroundColor(value > 1.0 ? .orange : .secondary)
             }
+        }
+    }
+}
+
+// MARK: - Limiter Control
+
+/// Per-cue limiter: an on/off switch plus how far to push the cue into it.
+struct LimiterControl: View {
+    @Binding var isOn: Bool
+    @Binding var boostDB: Float
+    var onEditStart: (() -> Void)? = nil
+    /// When non-nil, replaces the right-hand dB label — used in multi-select
+    /// to mean "selected items have different values; touching this will set
+    /// them all".
+    var mixedLabel: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Limiter").font(.headline)
+                Spacer()
+                Toggle("Limiter", isOn: $isOn)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+            }
+            HStack(spacing: 8) {
+                Text("Boost")
+                    .frame(width: 46, alignment: .trailing)
+                    .font(.callout)
+                Slider(value: $boostDB, in: PlaylistItem.limiterBoostRangeDB) { editing in
+                    if editing { onEditStart?() }
+                }
+                .opacity(mixedLabel != nil ? 0.5 : 1.0)
+                if let mixed = mixedLabel {
+                    Text(mixed)
+                        .frame(width: 44, alignment: .trailing)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary.opacity(0.7))
+                        .italic()
+                } else {
+                    Text(String(format: "+%.0f dB", boostDB))
+                        .frame(width: 44, alignment: .trailing)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .disabled(!isOn)
+            Text("Turns the quiet parts up by this much and holds the loud parts at their original level.")
+                .font(.caption2).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
