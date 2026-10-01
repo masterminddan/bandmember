@@ -1,0 +1,22 @@
+{
+  "buses" : [
+    {
+      "id" : "E666C05C-CCC5-4F60-B649-826F0AE4402F",
+      "name" : "IEMs"
+    },
+    {
+      "id" : "2944FC75-2742-41AB-B1F8-9D8DD7FBE561",
+      "name" : "FOH"
+    },
+    {
+      "id" : "C139FC63-CE61-456D-A78D-1D46381B2ED4",
+      "name" : "Mono L"
+    },
+    {
+      "id" : "A5884A65-D5DA-4124-A28F-BF48B5CD26C4",
+      "name" : "Mono R"
+    }
+  ],
+  "mainBusID" : "E666C05C-CCC5-4F60-B649-826F0AE4402F",
+  "version" : 1
+}

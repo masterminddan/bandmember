@@ -62,7 +62,7 @@ open build/BandMember.app
 - **AVPlayer** - Per-cue video playback with full-screen borderless windows
 - **ChannelGainAU** - Custom Audio Unit that takes a stereo cue input, applies L/R gain (with optional -3 dB mono sum), and places the result on a specific channel pair (or single channel) of an N-channel output bus, zeroing the rest
 - **AudioOutputManager** - Enumerates CoreAudio output devices, tracks the user's selection, and responds to hot-plug
-- **OutputBusStore** - Persisted named buses + per-device channel assignments at `~/Library/Application Support/BandMember/output-mappings.json`
+- **OutputBusStore** - Named buses are persisted at `config/output-buses.json` in this repo (the checkout the app was built from), so the bus IDs that playlists reference follow `git pull` to other machines. Per-device channel assignments stay machine-local at `~/Library/Application Support/BandMember/output-mappings.json` because device UIDs contain hardware serial numbers; map each bus to channels once per machine in the output mappings editor
 - **WhisperKit** - Local on-device speech-to-text for lyric transcription, with CoreML model caching under `~/Library/Application Support/BandMember/`
 - **SwiftUI** - Native macOS UI with AppKit integration for drag-and-drop and keyboard handling
 

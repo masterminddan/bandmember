@@ -2,7 +2,19 @@ import Foundation
 import Combine
 
 /// Shared, app-wide configuration of named output buses and per-device
-/// channel assignments. Persisted to Application Support.
+/// channel assignments. Persisted in two places:
+///
+/// - **Buses** (names, IDs, which one is the default) go to
+///   `config/output-buses.json` inside the source checkout the app was
+///   built from. Playlists reference buses by ID, so this file has to
+///   travel with the git repo for a playlist to open correctly on another
+///   machine. It contains nothing hardware-specific.
+/// - **Device mappings** stay in Application Support on each machine. They
+///   are keyed by CoreAudio device UID, which embeds hardware serial
+///   numbers and Bluetooth addresses, so they must never be written into
+///   the (public) repo. The local file also keeps a copy of the buses and
+///   is the sole store when the checkout isn't present (e.g. the .app was
+///   copied to a machine without the source).
 ///
 /// One bus is designated "default" (`mainBusID`) — it's guaranteed to
 /// exist and acts as the fallback when a cue's bus is missing or unmapped
@@ -16,10 +28,27 @@ final class OutputBusStore: ObservableObject {
     /// busID of the bus designated as the silent fallback. Persisted.
     private(set) var mainBusID: UUID = UUID()
 
-    private let configURL: URL
+    /// Machine-local file: device mappings plus a copy of the buses.
+    private let localURL: URL
+    /// Git-tracked file: buses only. Nil when the checkout isn't present.
+    private let sharedURL: URL?
+    /// Set when the git-tracked file exists but couldn't be read (e.g. it
+    /// has merge-conflict markers). We then leave it alone rather than
+    /// overwrite it with this machine's local bus list.
+    private var sharedFileUnreadable = false
     private var saveDebounce: AnyCancellable?
 
-    init() {
+    /// Root of the source checkout this binary was compiled from, baked in
+    /// at build time via `#filePath` (this file lives at
+    /// `<repo>/Sources/Playback/OutputBusStore.swift`). Each machine builds
+    /// from its own clone, so this resolves to that machine's clone.
+    private static let buildRepoRoot: URL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()   // Playback
+        .deletingLastPathComponent()   // Sources
+        .deletingLastPathComponent()   // repo root
+
+    /// `~/Library/Application Support/BandMember/output-mappings.json`.
+    private static func localConfigURL() -> URL {
         let fm = FileManager.default
         let support = (try? fm.url(for: .applicationSupportDirectory,
                                    in: .userDomainMask,
@@ -29,10 +58,44 @@ final class OutputBusStore: ObservableObject {
                 .appendingPathComponent("Library/Application Support")
         let dir = support.appendingPathComponent("BandMember", isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        self.configURL = dir.appendingPathComponent("output-mappings.json")
+        return dir.appendingPathComponent("output-mappings.json")
+    }
 
-        load()
+    /// `<repo>/config/output-buses.json`, or nil when the checkout this
+    /// binary was built from doesn't exist on this machine.
+    private static func sharedBusesURL() -> URL? {
+        let fm = FileManager.default
+        let root = buildRepoRoot
+        // Sanity-check that the baked-in path is really the checkout.
+        guard fm.fileExists(atPath: root.appendingPathComponent("Package.swift").path) else {
+            debugLog("OutputBusStore: source checkout not found at \(root.path); buses are local-only")
+            return nil
+        }
+        let dir = root.appendingPathComponent("config", isDirectory: true)
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            debugLog("OutputBusStore: could not create \(dir.path) (\(error)); buses are local-only")
+            return nil
+        }
+        return dir.appendingPathComponent("output-buses.json")
+    }
+
+    init() {
+        self.localURL = Self.localConfigURL()
+        self.sharedURL = Self.sharedBusesURL()
+        debugLog("OutputBusStore: mappings at \(localURL.path), buses at \(sharedURL?.path ?? "(local only)")")
+
+        loadLocal()
+        loadShared()
         ensureDefaults()
+
+        // One-time migration: a checkout with no bus file yet gets seeded
+        // from the buses this machine already had in Application Support.
+        if let url = sharedURL, !FileManager.default.fileExists(atPath: url.path) {
+            saveShared()
+            debugLog("OutputBusStore: seeded \(url.path) from local buses")
+        }
 
         // Coalesce writes — bus/mapping edits often come in bursts. Save
         // 200 ms after the last change.
@@ -44,8 +107,11 @@ final class OutputBusStore: ObservableObject {
 
     // MARK: - Persistence
 
-    private func load() {
-        guard let data = try? Data(contentsOf: configURL) else { return }
+    /// Loads the machine-local file: device mappings, plus the buses as
+    /// they were last seen here (replaced by `loadShared` when the
+    /// git-tracked bus file is available).
+    private func loadLocal() {
+        guard let data = try? Data(contentsOf: localURL) else { return }
         let dec = JSONDecoder()
 
         // Try the current schema first.
@@ -77,15 +143,73 @@ final class OutputBusStore: ObservableObject {
             } else if let first = self.buses.first {
                 self.mainBusID = first.id
             }
+            return
+        }
+        debugLog("OutputBusStore: could not decode \(localURL.path); starting from defaults")
+    }
+
+    /// Replaces the bus list with the git-tracked one, when present. The
+    /// repo is authoritative for buses so every machine resolves playlist
+    /// bus IDs the same way.
+    private func loadShared() {
+        guard let url = sharedURL, let data = try? Data(contentsOf: url) else { return }
+        guard let cfg = try? JSONDecoder().decode(SharedBusConfig.self, from: data),
+              !cfg.buses.isEmpty else {
+            sharedFileUnreadable = true
+            debugLog("OutputBusStore: could not decode \(url.path); keeping local buses and leaving that file untouched")
+            return
+        }
+        let localMainID = mainBusID
+        let hadLocalMain = buses.contains { $0.id == localMainID }
+
+        self.buses = cfg.buses
+        if let id = cfg.mainBusID, cfg.buses.contains(where: { $0.id == id }) {
+            self.mainBusID = id
+        } else {
+            self.mainBusID = cfg.buses[0].id
+        }
+
+        // This machine's default bus isn't in the shared list — it ran
+        // with its own bus list before the shared file arrived. Carry
+        // each device's default-bus assignment over to the shared default
+        // so those devices keep playing instead of going silent.
+        let sharedMainID = mainBusID
+        if hadLocalMain, localMainID != sharedMainID,
+           !cfg.buses.contains(where: { $0.id == localMainID }) {
+            for i in mappings.indices where mappings[i].assignments[sharedMainID] == nil {
+                if let asn = mappings[i].assignments[localMainID] {
+                    mappings[i].assignments[sharedMainID] = asn
+                }
+            }
         }
     }
 
     private func save() {
-        let cfg = OutputBusConfig(buses: buses, mappings: mappings, mainBusID: mainBusID)
+        saveLocal()
+        saveShared()
+    }
+
+    private func saveLocal() {
+        write(OutputBusConfig(buses: buses, mappings: mappings, mainBusID: mainBusID),
+              to: localURL)
+    }
+
+    private func saveShared() {
+        guard let url = sharedURL, !sharedFileUnreadable else { return }
+        write(SharedBusConfig(buses: buses, mainBusID: mainBusID), to: url)
+    }
+
+    private func write<T: Encodable>(_ value: T, to url: URL) {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? enc.encode(cfg) {
-            try? data.write(to: configURL)
+        guard let data = try? enc.encode(value) else { return }
+        // Don't touch the file when nothing changed — the bus file is
+        // tracked in git, and an idle launch should leave the tree clean.
+        if let existing = try? Data(contentsOf: url), existing == data { return }
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            debugLog("OutputBusStore: failed to save \(url.path): \(error)")
         }
     }
 
