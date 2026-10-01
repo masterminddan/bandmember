@@ -56,7 +56,7 @@ struct ContentView: View {
 
             Button(action: {
                 // Stop any selected playing items first
-                for id in store.selectedIDs {
+                for id in store.includingCollapsedMembers(store.selectedIDs) {
                     if store.playingItemIDs.contains(id) {
                         playbackEngine.stop(itemID: id)
                     }
@@ -101,9 +101,11 @@ struct ContentView: View {
 
     private func advanceSelectionToNextIdle() {
         guard let currentIndex = store.firstSelectedIndex else { return }
+        // Rows folded inside a collapsed group can't be selected.
+        let hidden = store.hiddenItemIDs
         for i in (currentIndex + 1)..<store.items.count {
             let candidate = store.items[i]
-            if !store.playingItemIDs.contains(candidate.id) {
+            if !store.playingItemIDs.contains(candidate.id) && !hidden.contains(candidate.id) {
                 store.selectedIDs = [candidate.id]
                 return
             }
@@ -113,13 +115,7 @@ struct ContentView: View {
     private func addDivider() {
         let divider = PlaylistItem(dividerName: "— Section —")
         // Insert after the last selected item, or at the end
-        if let lastIdx = store.selectedIDs.compactMap({ id in
-            store.items.firstIndex { $0.id == id }
-        }).max() {
-            store.items.insert(divider, at: lastIdx + 1)
-        } else {
-            store.items.append(divider)
-        }
+        store.items.insert(divider, at: store.insertionIndexAfterSelection)
         store.selectedIDs = [divider.id]
     }
 
