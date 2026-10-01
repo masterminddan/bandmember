@@ -40,15 +40,21 @@ class ChannelVolumeProcessor {
             process: channelTapProcess
         )
 
-        var tap: MTAudioProcessingTap?
-        let status = MTAudioProcessingTapCreate(
-            kCFAllocatorDefault,
-            &callbacks,
-            kMTAudioProcessingTapCreationFlag_PostEffects,
-            &tap
-        )
+        // The out-param's Swift type depends on the SDK: older SDKs import
+        // it as `Unmanaged<MTAudioProcessingTap>?`, the Xcode 26.6 SDK as a
+        // managed `MTAudioProcessingTap?`. `createTap` infers whichever one
+        // this SDK uses and `ownedTap` normalizes it, so the same source
+        // builds on both.
+        let (status, rawTap) = createTap {
+            MTAudioProcessingTapCreate(
+                kCFAllocatorDefault,
+                &callbacks,
+                kMTAudioProcessingTapCreationFlag_PostEffects,
+                $0
+            )
+        }
 
-        guard status == noErr, let unwrappedTap = tap else {
+        guard status == noErr, let unwrappedTap = ownedTap(rawTap) else {
             debugLog("BandMember: MTAudioProcessingTapCreate failed with status \(status)")
             Unmanaged<ChannelVolumeProcessor>.fromOpaque(clientInfo).release()
             return false
@@ -61,6 +67,26 @@ class ChannelVolumeProcessor {
         playerItem.audioMix = audioMix
         return true
     }
+}
+
+// MARK: - SDK-agnostic tap creation
+
+/// Calls `create` with an out-pointer whose pointee type is inferred from
+/// the callee, and returns the status plus whatever was written.
+private func createTap<T>(_ create: (UnsafeMutablePointer<T?>) -> OSStatus) -> (OSStatus, T?) {
+    var out: T? = nil
+    let status = create(&out)
+    return (status, out)
+}
+
+/// Older SDKs: the tap comes back +1 as `Unmanaged`; take ownership.
+private func ownedTap(_ tap: Unmanaged<MTAudioProcessingTap>?) -> MTAudioProcessingTap? {
+    tap?.takeRetainedValue()
+}
+
+/// Newer SDKs: the tap is already imported as a managed reference.
+private func ownedTap(_ tap: MTAudioProcessingTap?) -> MTAudioProcessingTap? {
+    tap
 }
 
 // MARK: - MTAudioProcessingTap C Callbacks
