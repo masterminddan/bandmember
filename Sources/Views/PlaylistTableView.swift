@@ -58,6 +58,9 @@ struct PlaylistTableView: View {
                         Button("Stop") { playbackEngine.stop(itemID: item.id) }
                             .disabled(!store.playingItemIDs.contains(item.id))
                         Divider()
+                        Button("Show in Finder") { showInFinder(item.fileURL) }
+                            .disabled(!item.fileExists)
+                        Divider()
                     }
                     Button("Delete") {
                         if store.playingItemIDs.contains(item.id) {
@@ -103,6 +106,11 @@ struct PlaylistTableView: View {
                     .allowsHitTesting(false)
             }
         }
+    }
+
+    /// Reveals the cue's file in a Finder window.
+    private func showInFinder(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     /// Resolves dropped item providers to supported media URLs, preserving the

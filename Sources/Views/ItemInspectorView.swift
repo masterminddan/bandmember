@@ -102,6 +102,43 @@ struct ItemInspectorView: View {
                     }
                 }
 
+                // Target display (applies to the selected video items)
+                let videoCount = selectedVideoCount
+                if videoCount > 0 {
+                    Divider()
+
+                    let commonDisplay = multiSelectTargetDisplay
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Target Display").font(.caption).foregroundColor(.secondary)
+                        Picker("Display", selection: Binding(
+                            get: { commonDisplay ?? mixedDisplayTag },
+                            set: { newValue in
+                                guard newValue != mixedDisplayTag else { return }
+                                store.pushUndo()
+                                for id in store.selectedIDs {
+                                    if let idx = store.items.firstIndex(where: { $0.id == id }),
+                                       store.items[idx].mediaType == .video {
+                                        store.items[idx].targetDisplayIndex = newValue
+                                    }
+                                }
+                            }
+                        )) {
+                            if commonDisplay == nil { Text("Mixed").tag(mixedDisplayTag) }
+                            Text("Main Display").tag(0)
+                            Text("2nd Display").tag(1)
+                        }
+                        .labelsHidden()
+                        if videoCount < store.selectedIDs.count {
+                            Text("Applies to the \(videoCount) selected video\(videoCount == 1 ? "" : "s")")
+                                .font(.caption2).foregroundColor(.secondary)
+                        }
+                        if commonDisplay == 1 && NSScreen.screens.count < 2 {
+                            Text("2nd display not connected — video will not play")
+                                .font(.caption2).foregroundColor(.orange)
+                        }
+                    }
+                }
+
                 Divider()
 
                 // Output bus (applies to all selected)
@@ -183,6 +220,27 @@ struct ItemInspectorView: View {
         guard let uid = audioOut.currentDevice?.uid,
               let asn = busStore.assignment(busID: busID, deviceUID: uid) else { return false }
         return asn.isMonoSum
+    }
+
+    /// Sentinel tag for the "Mixed" row of the multi-select display picker.
+    private var mixedDisplayTag: Int { -1 }
+
+    /// Number of selected items that are videos — the display picker only
+    /// touches those (audio items set the same field from the Lyrics tab).
+    private var selectedVideoCount: Int {
+        store.selectedIDs.filter { id in
+            store.items.first { $0.id == id }?.mediaType == .video
+        }.count
+    }
+
+    /// Returns the common target display if all selected videos share one, otherwise nil.
+    private var multiSelectTargetDisplay: Int? {
+        let indices = Set(store.selectedIDs.compactMap { id -> Int? in
+            guard let item = store.items.first(where: { $0.id == id }),
+                  item.mediaType == .video else { return nil }
+            return item.targetDisplayIndex
+        })
+        return indices.count == 1 ? indices.first : nil
     }
 
     /// Returns the common output bus ID if all selected items share one, otherwise nil.
@@ -588,6 +646,14 @@ struct FileDropField: View {
                     .padding(6).frame(maxWidth: .infinity, alignment: .leading)
             }
             .background { FileDropReceiver(isTargeted: $isTargeted, onDrop: onDrop) }
+            .contextMenu {
+                Button("Show in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [URL(fileURLWithPath: filePath)])
+                }
+                .disabled(filePath.isEmpty
+                          || !FileManager.default.fileExists(atPath: filePath))
+            }
         }
     }
 }
