@@ -43,39 +43,49 @@ struct PlaylistTableView: View {
     }
 
     /// One row of the list: an item, where it sits in `store.items`, and
-    /// its place in a play group (if any).
+    /// its place in a group (if any).
     private struct Row: Identifiable {
         let item: PlaylistItem
         let index: Int
+        /// For a track, its number counting tracks only — headers and
+        /// dividers don't use one up.
+        let number: Int
         let group: PlaylistRowView.GroupRole
-        /// The rest of the group, when this row is a collapsed group's
-        /// first item and is standing in for all of them.
-        let foldedItems: [PlaylistItem]
+        /// For a header, the tracks of its group.
+        let members: [PlaylistItem]
+        /// False for a track whose group header is disabled.
+        var groupEnabled = true
         var id: UUID { item.id }
     }
 
-    /// The playlist with collapsed groups folded down to their first item.
+    /// The playlist as shown: tracks of collapsed groups are left out.
     private var rows: [Row] {
         let items = store.items
-        var roles = [PlaylistRowView.GroupRole](repeating: .none, count: items.count)
-        var folded: [Int: [PlaylistItem]] = [:]
-        var hidden = IndexSet()
-        for group in store.playGroups {
-            let head = group.lowerBound
-            let collapsed = store.collapsedGroupIDs.contains(items[head].id)
-            let trackCount = group.filter { !items[$0].isDivider }.count
-            roles[head] = .head(trackCount: trackCount, collapsed: collapsed)
-            for index in group.dropFirst() { roles[index] = .member }
-            if collapsed {
-                folded[head] = group.dropFirst().map { items[$0] }
-                hidden.insert(integersIn: (head + 1)...group.upperBound)
+        let collapsed = store.collapsedGroupIDs
+        var rows: [Row] = []
+        rows.reserveCapacity(items.count)
+        var trackNumber = 0
+        var headerEnabled = true   // of the group being walked through
+        for (index, item) in items.enumerated() {
+            if item.isMedia { trackNumber += 1 }
+            if item.isGroup {
+                headerEnabled = item.isEnabled
+                let members = Array(items[store.memberRange(ofGroupAt: index)])
+                rows.append(Row(item: item, index: index, number: 0,
+                                group: .header(trackCount: members.count,
+                                               collapsed: collapsed.contains(item.id)),
+                                members: members))
+            } else if let groupID = item.groupID {
+                if collapsed.contains(groupID) { continue }
+                rows.append(Row(item: item, index: index, number: trackNumber,
+                                group: .member, members: [],
+                                groupEnabled: headerEnabled))
+            } else {
+                rows.append(Row(item: item, index: index, number: trackNumber,
+                                group: .none, members: []))
             }
         }
-        return items.indices.compactMap { index in
-            hidden.contains(index) ? nil : Row(item: items[index], index: index,
-                                               group: roles[index],
-                                               foldedItems: folded[index] ?? [])
-        }
+        return rows
     }
 
     var body: some View {
@@ -85,40 +95,20 @@ struct PlaylistTableView: View {
                 let item = row.item
                 PlaylistRowView(
                     item: item,
-                    index: row.index,
+                    number: row.number,
                     isPlaying: store.playingItemIDs.contains(item.id)
-                        || row.foldedItems.contains { store.playingItemIDs.contains($0.id) },
+                        || row.members.contains { store.playingItemIDs.contains($0.id) },
                     group: row.group,
-                    foldedItems: row.foldedItems
+                    members: row.members,
+                    groupEnabled: row.groupEnabled
                 )
                 .tag(item.id)
                 .listRowBackground(rowBackground(for: item))
-                .contextMenu {
-                    if !item.isDivider {
-                        Button("Play") { playbackEngine.play(item: item) }
-                        Button("Stop") { stopPlayback(ofRow: row) }
-                            .disabled(!store.playingItemIDs.contains(item.id))
-                        Divider()
-                        Button("Show in Finder") { showInFinder(item.fileURL) }
-                            .disabled(!item.fileExists)
-                        Divider()
-                    }
-                    if case .head(_, let collapsed) = row.group {
-                        Button(collapsed ? "Expand Group" : "Collapse Group") {
-                            store.setGroupCollapsed(!collapsed, headID: item.id)
-                        }
-                        Divider()
-                    }
-                    Button(row.foldedItems.isEmpty ? "Delete" : "Delete Group") {
-                        stopPlayback(ofRow: row)
-                        store.deleteItem(id: item.id)
-                    }
-                }
+                .contextMenu { contextMenu(for: row) }
             }
             .onMove { source, destination in
                 // Offsets are positions among the visible rows; translate
-                // them back to positions in the full playlist. A collapsed
-                // group travels as a unit.
+                // them back to positions in the full playlist.
                 let itemSource = IndexSet(source.map { rows[$0].index })
                 let itemDestination = destination < rows.count
                     ? rows[destination].index : store.items.count
@@ -127,7 +117,7 @@ struct PlaylistTableView: View {
         }
         .listStyle(.inset(alternatesRowBackgrounds: true))
         .onDeleteCommand {
-            for id in store.includingCollapsedMembers(store.selectedIDs) {
+            for id in store.includingGroupMembers(store.selectedIDs) {
                 if store.playingItemIDs.contains(id) {
                     playbackEngine.stop(itemID: id)
                 }
@@ -159,10 +149,62 @@ struct PlaylistTableView: View {
         }
     }
 
-    /// Stops the row's item and, for a collapsed group, everything folded
-    /// inside it.
+    @ViewBuilder
+    private func contextMenu(for row: Row) -> some View {
+        let item = row.item
+        if !item.isDivider {
+            Button(item.isGroup ? "Play Group" : "Play") { playbackEngine.play(item: item) }
+                .disabled(store.playSet(for: item).isEmpty)
+            if case .member = row.group {
+                Button("Play Only This Track") { playbackEngine.play(item: item, alone: true) }
+                    .disabled(!item.isEnabled)
+            }
+            Button("Stop") { stopPlayback(ofRow: row) }
+                .disabled(!store.isPlaying(item))
+            Divider()
+        }
+        if item.isMedia {
+            Button("Show in Finder") { showInFinder(item.fileURL) }
+                .disabled(!item.fileExists)
+            Divider()
+            Button("Group Selected Tracks") {
+                selectForMenuAction(item)
+                store.groupSelected()
+            }
+            if case .member = row.group {
+                Button("Remove from Group") {
+                    selectForMenuAction(item)
+                    store.removeSelectedFromGroup()
+                }
+            }
+            Divider()
+        }
+        if case .header(_, let collapsed) = row.group {
+            Button(collapsed ? "Expand Group" : "Collapse Group") {
+                store.setGroupCollapsed(!collapsed, groupID: item.id)
+            }
+            Button("Ungroup") {
+                selectForMenuAction(item)
+                store.ungroupSelected()
+            }
+            Divider()
+        }
+        Button(item.isGroup ? "Delete Group" : "Delete") {
+            stopPlayback(ofRow: row)
+            store.deleteItem(id: item.id)
+        }
+    }
+
+    /// Menu actions that work on the selection apply to the clicked row
+    /// alone when it isn't part of the selection.
+    private func selectForMenuAction(_ item: PlaylistItem) {
+        if !store.selectedIDs.contains(item.id) { store.selectedIDs = [item.id] }
+    }
+
+    /// Stops the row's item and, for a group header, every track in the
+    /// group.
     private func stopPlayback(ofRow row: Row) {
-        for item in [row.item] + row.foldedItems where store.playingItemIDs.contains(item.id) {
+        for item in [row.item] + row.members where store.playingItemIDs.contains(item.id) {
             playbackEngine.stop(itemID: item.id)
         }
     }
@@ -220,40 +262,57 @@ struct PlaylistTableView: View {
 // MARK: - Row View
 
 struct PlaylistRowView: View {
-    /// Where a row sits in a play group — a run of items chained together
-    /// with "play next" so they start as one.
+    /// Where a row sits relative to groups.
     enum GroupRole {
         case none
-        /// First item of a group; carries the disclosure arrow.
-        case head(trackCount: Int, collapsed: Bool)
+        /// A group's header row; carries the disclosure arrow.
+        case header(trackCount: Int, collapsed: Bool)
+        /// A track inside a group.
         case member
     }
 
     let item: PlaylistItem
-    let index: Int
+    /// Track number shown in the row (unused for headers and dividers).
+    let number: Int
     let isPlaying: Bool
     var group: GroupRole = .none
-    /// The other items of the group when this row is a collapsed group's
-    /// first item; empty otherwise.
-    var foldedItems: [PlaylistItem] = []
+    /// For a header, the tracks of its group; empty otherwise.
+    var members: [PlaylistItem] = []
+    /// False for a track whose group header is disabled.
+    var groupEnabled = true
     @EnvironmentObject var store: PlaylistStore
 
-    private var isMember: Bool {
-        if case .member = group { return true }
-        return false
-    }
+    /// Dimmed when the entry won't play: unchecked itself, or inside an
+    /// unchecked group.
+    private var isActive: Bool { item.isEnabled && groupEnabled }
 
-    /// Files missing among the items folded inside this row.
-    private var foldedMissing: [PlaylistItem] {
-        foldedItems.filter { !$0.fileExists }
+    /// Enable / disable checkbox at the right-hand end of the row.
+    private var enabledCheckbox: some View {
+        Toggle("", isOn: Binding(
+            get: { item.isEnabled },
+            set: { store.setEnabled($0, id: item.id) }
+        ))
+        .toggleStyle(.checkbox)
+        .labelsHidden()
+        .help(item.isGroup
+              ? "Uncheck to skip this whole group"
+              : "Uncheck to leave this track out when its group plays")
+        .frame(width: 20)
     }
 
     var body: some View {
         if item.isDivider {
             dividerRow
+        } else if case .header(let trackCount, let collapsed) = group {
+            headerRow(trackCount: trackCount, collapsed: collapsed)
         } else {
             mediaRow
         }
+    }
+
+    private var isMember: Bool {
+        if case .member = group { return true }
+        return false
     }
 
     private var dividerRow: some View {
@@ -267,73 +326,117 @@ struct PlaylistRowView: View {
         .padding(.vertical, 4)
     }
 
+    private var playingIndicator: some View {
+        ZStack {
+            if isPlaying {
+                Image(systemName: "play.fill")
+                    .foregroundColor(.green)
+                    .font(.caption)
+            }
+        }
+        .frame(width: 16)
+    }
+
+    private func headerRow(trackCount: Int, collapsed: Bool) -> some View {
+        HStack(spacing: 8) {
+            headerContent(trackCount: trackCount, collapsed: collapsed)
+                .opacity(isActive ? 1.0 : 0.45)
+            enabledCheckbox
+        }
+        .padding(.vertical, 3)
+    }
+
+    private func headerContent(trackCount: Int, collapsed: Bool) -> some View {
+        HStack(spacing: 8) {
+            Button(action: {
+                // Option-click folds or unfolds every group, as in Finder.
+                if NSEvent.modifierFlags.contains(.option) {
+                    store.setAllGroupsCollapsed(!collapsed)
+                } else {
+                    store.setGroupCollapsed(!collapsed, groupID: item.id)
+                }
+            }) {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+                    .rotationEffect(.degrees(collapsed ? 0 : 90))
+                    .frame(width: 14, height: 16)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(collapsed ? "Show this group's tracks" : "Hide this group's tracks")
+
+            playingIndicator
+
+            Image(systemName: item.mediaType.icon)
+                .foregroundColor(.secondary)
+                .frame(width: 20)
+                .font(.callout)
+
+            Text(item.name)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .font(.body.weight(.semibold))
+
+            Text(trackCountLabel(trackCount))
+                .foregroundColor(.secondary)
+                .font(.caption)
+                .lineLimit(1)
+
+            Spacer()
+
+            // With the tracks folded away, the header has to speak for them.
+            let missing = collapsed ? members.filter { !$0.fileExists } : []
+            if !missing.isEmpty {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundColor(.red)
+                    .font(.caption)
+                    .help("File not found for: " + missing.map(\.name).joined(separator: ", "))
+            }
+        }
+    }
+
+    /// "6 tracks", or "5 of 6 tracks" when some are switched off.
+    private func trackCountLabel(_ trackCount: Int) -> String {
+        let enabled = members.filter(\.isEnabled).count
+        if enabled < trackCount { return "\(enabled) of \(trackCount) tracks" }
+        return trackCount == 1 ? "1 track" : "\(trackCount) tracks"
+    }
+
     private var mediaRow: some View {
         HStack(spacing: 8) {
-            // Disclosure arrow on the first item of a play group
-            ZStack {
-                if case .head(_, let collapsed) = group {
-                    Button(action: {
-                        // Option-click folds or unfolds every group, as in Finder.
-                        if NSEvent.modifierFlags.contains(.option) {
-                            store.setAllGroupsCollapsed(!collapsed)
-                        } else {
-                            store.setGroupCollapsed(!collapsed, headID: item.id)
-                        }
-                    }) {
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundColor(.secondary)
-                            .rotationEffect(.degrees(collapsed ? 0 : 90))
-                            .frame(width: 14, height: 16)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(collapsed ? "Show the tracks that play with this one"
-                                    : "Hide the tracks that play with this one")
-                }
-            }
-            .frame(width: 14)
+            mediaContent.opacity(rowOpacity)
+            enabledCheckbox
+        }
+        .padding(.vertical, 2)
+    }
 
-            // Playing indicator
-            ZStack {
-                if isPlaying {
-                    Image(systemName: "play.fill")
-                        .foregroundColor(.green)
-                        .font(.caption)
-                }
-            }
-            .frame(width: 16)
+    private var mediaContent: some View {
+        HStack(spacing: 8) {
+            // Lines up with the disclosure arrow on group headers; tracks
+            // inside a group sit one step further in.
+            Color.clear.frame(width: isMember ? 28 : 14, height: 1)
+
+            playingIndicator
 
             // Index number
-            Text("\(index + 1)")
+            Text("\(number)")
                 .foregroundColor(.secondary)
                 .frame(width: 28, alignment: .trailing)
                 .monospacedDigit()
                 .font(.callout)
 
-            // Type icon (items inside a group sit indented under its first)
+            // Type icon
             Image(systemName: item.mediaType.icon)
                 .foregroundColor(item.mediaType == .video ? .blue : .orange)
                 .frame(width: 20)
                 .font(.callout)
-                .padding(.leading, isMember ? 14 : 0)
 
             // Name
             Text(item.name)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .font(.body)
-
-            // Collapsed group: say how much is folded into this row
-            if case .head(let trackCount, true) = group {
-                Text("\(trackCount) tracks")
-                    .foregroundColor(.secondary)
-                    .font(.caption)
-                    .lineLimit(1)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
-            }
 
             Spacer()
 
@@ -343,33 +446,14 @@ struct PlaylistRowView: View {
                     .foregroundColor(.red)
                     .font(.caption)
                     .help("File not found: \(item.filePath)")
-            } else if !foldedMissing.isEmpty {
-                Image(systemName: "exclamationmark.triangle")
-                    .foregroundColor(.red)
-                    .font(.caption)
-                    .help("File not found for: " + foldedMissing.map(\.name).joined(separator: ", "))
             }
-
-            // Play-next label (refers to the checkbox beside it)
-            Text("Play next")
-                .foregroundColor(.secondary)
-                .font(.caption)
-
-            // Auto-follow checkbox
-            Toggle("", isOn: Binding(
-                get: { item.autoFollow },
-                set: { newValue in
-                    if let idx = store.items.firstIndex(where: { $0.id == item.id }) {
-                        store.pushUndo()
-                        store.items[idx].autoFollow = newValue
-                    }
-                }
-            ))
-            .toggleStyle(.checkbox)
-            .help("Also play next item simultaneously")
-            .frame(width: 20)
         }
-        .padding(.vertical, 2)
-        .opacity(item.fileExists ? 1.0 : 0.5)
+    }
+
+    /// Rows that won't play — file missing, unchecked, or in an unchecked
+    /// group — are dimmed. (The checkbox itself is kept at full strength.)
+    private var rowOpacity: Double {
+        if !isActive { return 0.45 }
+        return item.fileExists ? 1.0 : 0.5
     }
 }

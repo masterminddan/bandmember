@@ -6,8 +6,8 @@ A native macOS app for playing synchronized audio and video files in live perfor
 
 - **Sample-accurate sync** - Multiple audio tracks play in perfect sync via AVAudioEngine on a shared render timeline
 - **Multi-monitor video** - Assign video files to Main Display or 2nd Display; new videos layer on top of existing ones
-- **Auto-follow chains** - Check "play next" to trigger multiple items simultaneously with one spacebar press
-- **Collapsible groups** - Tracks chained with "play next" form a group with a disclosure arrow on its first track; collapse it to one row per song (option-click folds or unfolds every group). A collapsed group moves, copies and deletes as a unit
+- **Groups** - Put the tracks of a song in a group and they all start together from one spacebar press, whether the group's header or any track inside it is selected. Groups have their own name and color, collapse to a single row (option-click the arrow to fold or unfold all of them), and move, copy and delete as a unit. Drag tracks in and out, or use Group (Cmd+G), Ungroup and Remove from Group. Playlists made with the old per-track "play next" checkboxes are converted to groups when opened
+- **Enable / disable** - Every track and group has a checkbox at the right-hand end of its row. An unchecked track is left out when its group plays; an unchecked group is skipped altogether, and the spacebar passes over it
 - **Per-channel volume** - Independent master, left, and right channel volume (0-200%) with real-time waveform preview
 - **Per-track limiter** - Every audio track has its own look-ahead limiter, so a track pushed past 100% only squashes itself instead of pumping everything playing alongside it. Switch on a track's Limiter and raise Boost to bring its quiet passages up toward its loud ones (the waveform previews the result). A final safety limiter works on each physical output separately, so an overload in the IEMs never ducks FOH.
 - **Multi-output routing** - Drive any CoreAudio output device (built-in speakers, Focusrite 4i4, etc.) independent of the system default. Cues route to named buses ("FOH", "IEM", "Click"); per-device mappings translate each bus to physical output channels (stereo pair or mono-sum). Switching rigs only requires re-mapping buses on the new device, not editing every cue. Unassigned buses on a device play silent, so the same playlist can sound right at home, in rehearsal, and at the gig.
@@ -20,7 +20,7 @@ A native macOS app for playing synchronized audio and video files in live perfor
 - **Fix Lyrics** - Paste corrected lyrics and keep the existing timestamps; word-set alignment handles line-break differences
 - **Undo / redo** - Cmd+Z / Cmd+Shift+Z across all playlist edits, with a 50-level history
 - **Playlist management** - Add, delete, reorder, cut/copy/paste, multi-select (shift/cmd click), color-coded entries, text dividers
-- **QLab import** - Import .qlab5 workspaces with cue names, file paths, and auto-follow settings
+- **QLab import** - Import .qlab5 workspaces with cue names and file paths; auto-follow chains become groups
 - **Save/Load** - JSON-based playlists with auto-restore of last session
 - **Live performance ready** - 1-second fade out on escape, spacebar auto-advances to next idle item, dark mode
 
@@ -47,6 +47,8 @@ A native macOS app for playing synchronized audio and video files in live perfor
 | Cmd+Z / Cmd+Shift+Z | Undo / Redo |
 | Cmd+X/C/V | Cut/Copy/Paste items |
 | Cmd+D | Add media files |
+| Cmd+G | Group selected tracks |
+| Cmd+Shift+G | Ungroup |
 
 ## Building
 

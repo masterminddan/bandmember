@@ -82,26 +82,6 @@ struct ItemInspectorView: View {
 
                 Divider()
 
-                // Auto-follow (applies to all selected)
-                Toggle(isOn: Binding(
-                    get: { multiSelectAutoFollow },
-                    set: { newValue in
-                        store.pushUndo()
-                        for id in store.selectedIDs {
-                            if let idx = store.items.firstIndex(where: { $0.id == id }) {
-                                store.items[idx].autoFollow = newValue
-                            }
-                        }
-                    }
-                )) {
-                    VStack(alignment: .leading) {
-                        Text("Also play next")
-                        Text("Simultaneously triggers the next item")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-
                 // Target display (applies to the selected video items)
                 let videoCount = selectedVideoCount
                 if videoCount > 0 {
@@ -228,13 +208,6 @@ struct ItemInspectorView: View {
             store.items.first { $0.id == id }?.colorTag
         })
         return tags.count == 1 ? tags.first! : .none
-    }
-
-    /// Returns true if ALL selected items have autoFollow
-    private var multiSelectAutoFollow: Bool {
-        store.selectedIDs.allSatisfy { id in
-            store.items.first { $0.id == id }?.autoFollow ?? false
-        }
     }
 
     /// True if `busID` is configured as mono-sum on the currently active
@@ -383,6 +356,8 @@ struct ItemInspectorView: View {
         Group {
             if store.items[safe: index]?.isDivider == true {
                 dividerBody(for: index)
+            } else if store.items[safe: index]?.isGroup == true {
+                groupBody(for: index, id: id)
             } else {
                 VStack(spacing: 0) {
                     Picker("", selection: Binding(
@@ -444,6 +419,79 @@ struct ItemInspectorView: View {
                         store.items[index].colorTag = newTag
                     }
                 )
+                Spacer()
+            }
+            .padding()
+        }
+    }
+
+    /// Inspector for a group header: its name and color, and the start /
+    /// loop points used when the group is triggered from the header. The
+    /// header has no audio of its own, so those are set on the waveform of
+    /// one of the group's tracks.
+    @ViewBuilder
+    private func groupBody(for index: Int, id: UUID) -> some View {
+        let members = index < store.items.count
+            ? Array(store.items[store.memberRange(ofGroupAt: index)]) : []
+        let reference = members.first { $0.mediaType == .audio && $0.fileExists }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                nameField(for: index)
+
+                Text(members.count == 1 ? "1 track plays together" : "\(members.count) tracks play together")
+                    .font(.caption).foregroundColor(.secondary)
+
+                if let reference = reference {
+                    WaveformView(
+                        filePath: reference.filePath,
+                        itemID: reference.id,
+                        startPosition: Binding(
+                            get: { store.items[safe: index]?.startPosition ?? 0 },
+                            set: { newValue in
+                                guard index < store.items.count else { return }
+                                store.items[index].startPosition = newValue
+                            }
+                        ),
+                        endPosition: Binding(
+                            get: { store.items[safe: index]?.endPosition },
+                            set: { newValue in
+                                guard index < store.items.count else { return }
+                                store.items[index].endPosition = newValue
+                            }
+                        ),
+                        masterVolume: reference.masterVolume,
+                        leftVolume: reference.leftVolume,
+                        rightVolume: reference.rightVolume,
+                        limiterBoostDB: reference.limiterEnabled ? reference.limiterBoostDB : nil,
+                        beats: tempoBeats(for: id),
+                        snapMode: snapMode
+                    )
+                    Text("Showing \(reference.name). The start and loop points set here apply to the whole group when it is played from this row.")
+                        .font(.caption2).foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    tempoLabel(for: id)
+                }
+
+                Divider()
+
+                ColorTagPicker(
+                    value: store.items[safe: index]?.colorTag ?? .none,
+                    onChange: { newTag in
+                        guard index < store.items.count else { return }
+                        store.pushUndo()
+                        store.items[index].colorTag = newTag
+                    }
+                )
+
+                Divider()
+
+                Button("Ungroup") {
+                    store.selectedIDs = [id]
+                    store.ungroupSelected()
+                }
+                .help("Remove the group and keep its tracks (⇧⌘G)")
+
                 Spacer()
             }
             .padding()
@@ -746,13 +794,13 @@ struct LimiterControl: View {
                 .opacity(mixedLabel != nil ? 0.5 : 1.0)
                 if let mixed = mixedLabel {
                     Text(mixed)
-                        .frame(width: 44, alignment: .trailing)
+                        .frame(width: 50, alignment: .trailing)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.secondary.opacity(0.7))
                         .italic()
                 } else {
                     Text(String(format: "+%.0f dB", boostDB))
-                        .frame(width: 44, alignment: .trailing)
+                        .frame(width: 50, alignment: .trailing)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.secondary)
                 }

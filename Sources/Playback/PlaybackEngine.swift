@@ -345,17 +345,16 @@ class PlaybackEngine: ObservableObject {
     // MARK: - Public API
     // ══════════════════════════════════════════════════════════════════
 
-    func play(item: PlaylistItem) {
-        // Collect this item + any chained via auto-follow.
-        var items: [PlaylistItem] = [item]
-        if item.autoFollow, let store = store {
-            var idx = store.items.firstIndex(where: { $0.id == item.id })
-            while let cur = idx {
-                let current = store.items[cur]
-                guard current.autoFollow, cur + 1 < store.items.count else { break }
-                items.append(store.items[cur + 1])
-                idx = cur + 1
-            }
+    /// Plays `item` along with everything that belongs with it: triggering
+    /// a group header, or any track inside a group, starts the whole group
+    /// in sync. The triggered item's start and loop points apply to all of
+    /// them. Pass `alone` to audition a single track without its group.
+    func play(item: PlaylistItem, alone: Bool = false) {
+        let items: [PlaylistItem]
+        if !alone, let store = store {
+            items = store.playSet(for: item)
+        } else {
+            items = item.isMedia && item.isEnabled ? [item] : []
         }
         let endStr = item.endPosition.map { String(format: "%.2f", $0) } ?? "nil"
         debugLog(String(format: "[ENGINE] play(%@) startPosition=%.2fs endPosition=%@",
@@ -364,15 +363,21 @@ class PlaybackEngine: ObservableObject {
                          startTime: item.startPosition,
                          endTime: item.endPosition)
 
-        // If the triggered item asks for lyrics, find a doc for the chain and
-        // open the presenter on its target display.
-        if item.showLyrics, let store = store,
-           let hit = LyricsStore.shared.lyricsForChain(triggeredItemID: item.id, store: store) {
-            debugLog("Lyrics: presenting for \(item.name) (start=\(item.startPosition)s) from \((hit.item.filePath as NSString).lastPathComponent) — \(hit.doc.segments.count) segments, model=\(hit.doc.modelUsed), created=\(hit.doc.createdAt)")
+        // If the triggered track — or, failing that, any track started with
+        // it — asks for lyrics, find a doc among them and open the presenter
+        // on that track's target display.
+        let lyricOwner = (item.isMedia && item.showLyrics) ? item : items.first { $0.showLyrics }
+        if var owner = lyricOwner, let store = store,
+           let hit = LyricsStore.shared.lyricsForChain(triggeredItemID: owner.id, store: store) {
+            // The presenter follows the owner's playhead, which started
+            // from the triggered item's position.
+            owner.startPosition = item.startPosition
+            owner.endPosition = item.endPosition
+            debugLog("Lyrics: presenting for \(owner.name) (start=\(owner.startPosition)s) from \((hit.item.filePath as NSString).lastPathComponent) — \(hit.doc.segments.count) segments, model=\(hit.doc.modelUsed), created=\(hit.doc.createdAt)")
             LyricsPresenter.show(
-                item: item,
+                item: owner,
                 lyrics: hit.doc,
-                screenIndex: item.targetDisplayIndex,
+                screenIndex: owner.targetDisplayIndex,
                 engine: self
             )
         }
@@ -456,29 +461,6 @@ class PlaybackEngine: ObservableObject {
         }
     }
 
-    func togglePlay(item: PlaylistItem) {
-        let isPlaying = audioCues[item.id] != nil || videoPlayers[item.id] != nil
-        if isPlaying {
-            // Stop this item and all chained items
-            var ids: [UUID] = [item.id]
-            if item.autoFollow, let store = store {
-                var idx = store.items.firstIndex(where: { $0.id == item.id })
-                while let cur = idx {
-                    let current = store.items[cur]
-                    guard current.autoFollow, cur + 1 < store.items.count else { break }
-                    let next = store.items[cur + 1]
-                    if audioCues[next.id] != nil || videoPlayers[next.id] != nil {
-                        ids.append(next.id)
-                    }
-                    idx = cur + 1
-                }
-            }
-            for id in ids { stop(itemID: id) }
-        } else {
-            play(item: item)
-        }
-    }
-
     func updateVolume(for item: PlaylistItem) {
         if let cue = audioCues[item.id] {
             cue.gainAU.masterGain = item.masterVolume
@@ -522,7 +504,7 @@ class PlaybackEngine: ObservableObject {
         var videoItems: [(item: PlaylistItem, player: AVPlayer)]  = []
 
         for item in items {
-            if item.isDivider { continue }
+            guard item.isMedia else { continue }
 
             if audioCues[item.id] != nil || videoPlayers[item.id] != nil {
                 stop(itemID: item.id)

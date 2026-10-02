@@ -63,7 +63,7 @@ class TempoCoordinator: ObservableObject {
 
     /// Look up the tempo source for a given item. Prefers a track whose name
     /// contains "click"; otherwise falls back to the first audio item in the
-    /// same auto-follow chain.
+    /// same group.
     func tempoData(forItemID itemID: UUID, store: PlaylistStore) -> TempoData? {
         guard let sourcePath = store.tempoSourcePath(forItemID: itemID) else { return nil }
         return cache[sourcePath]
@@ -71,20 +71,15 @@ class TempoCoordinator: ObservableObject {
 }
 
 extension PlaylistStore {
-    /// Indices of all items in the same auto-follow chain as `index`. A chain
-    /// is a maximal contiguous run where every item except the last has
-    /// `autoFollow = true`.
+    /// Indices of all the tracks that play together with the item at
+    /// `index`: the tracks of its group if it is a group header or inside a
+    /// group, otherwise just the item itself.
     func songChainIndices(forIndex index: Int) -> [Int] {
         guard index >= 0, index < items.count else { return [] }
-        var start = index
-        while start > 0, items[start - 1].autoFollow, !items[start - 1].isDivider {
-            start -= 1
+        if let header = groupHeaderIndex(forItemAt: index) {
+            return Array(memberRange(ofGroupAt: header))
         }
-        var end = index
-        while end < items.count - 1, items[end].autoFollow, !items[end + 1].isDivider {
-            end += 1
-        }
-        return Array(start...end)
+        return [index]
     }
 
     /// File path of the item in the chain that should drive tempo: prefer a

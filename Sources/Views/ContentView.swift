@@ -54,9 +54,15 @@ struct ContentView: View {
             }
             .help("Add text divider")
 
+            Button(action: { store.groupSelected() }) {
+                Label("Group", systemImage: "folder.badge.plus")
+            }
+            .disabled(!store.canGroupSelection)
+            .help("Put the selected tracks in a group that plays together (⌘G)")
+
             Button(action: {
                 // Stop any selected playing items first
-                for id in store.includingCollapsedMembers(store.selectedIDs) {
+                for id in store.includingGroupMembers(store.selectedIDs) {
                     if store.playingItemIDs.contains(id) {
                         playbackEngine.stop(itemID: id)
                     }
@@ -92,20 +98,30 @@ struct ContentView: View {
     private func handleSpacebar() {
         guard let item = store.firstSelectedItem else { return }
 
-        if !store.playingItemIDs.contains(item.id) {
+        if !store.isPlaying(item) {
             playbackEngine.play(item: item)
         }
 
         advanceSelectionToNextIdle()
     }
 
+    /// Moves the selection to the next row that isn't playing, passing over
+    /// anything that is disabled. Triggering anything in a group plays the
+    /// whole group, so the search starts after the group rather than on its
+    /// next track.
     private func advanceSelectionToNextIdle() {
         guard let currentIndex = store.firstSelectedIndex else { return }
+        var searchFrom = currentIndex + 1
+        if let header = store.groupHeaderIndex(forItemAt: currentIndex) {
+            searchFrom = store.memberRange(ofGroupAt: header).upperBound
+        }
         // Rows folded inside a collapsed group can't be selected.
         let hidden = store.hiddenItemIDs
-        for i in (currentIndex + 1)..<store.items.count {
+        guard searchFrom < store.items.count else { return }
+        for i in searchFrom..<store.items.count {
             let candidate = store.items[i]
-            if !store.playingItemIDs.contains(candidate.id) && !hidden.contains(candidate.id) {
+            if !store.isPlaying(candidate) && !hidden.contains(candidate.id)
+                && store.isEffectivelyEnabled(at: i) {
                 store.selectedIDs = [candidate.id]
                 return
             }
@@ -114,8 +130,9 @@ struct ContentView: View {
 
     private func addDivider() {
         let divider = PlaylistItem(dividerName: "— Section —")
-        // Insert after the last selected item, or at the end
-        store.items.insert(divider, at: store.insertionIndexAfterSelection)
+        // Insert after the last selected row (and clear of its group), or
+        // at the end
+        store.items.insert(divider, at: store.topLevelInsertionIndexAfterSelection)
         store.selectedIDs = [divider.id]
     }
 
@@ -182,14 +199,14 @@ struct ContentView: View {
             do {
                 let imported = try QLabImporter.importCues(from: url)
                 playbackEngine.stopAll()
-                store.items = []
                 store.currentFilePath = nil
-                for cue in imported {
+                // QLab chains cues with auto-follow; those become groups.
+                store.installConvertingChains(imported.map { cue in
                     var item = PlaylistItem(url: URL(fileURLWithPath: cue.filePath))
                     item.name = cue.name
                     item.autoFollow = cue.autoFollow
-                    store.items.append(item)
-                }
+                    return item
+                })
                 showAlert(title: "Import Complete",
                           message: "Imported \(imported.count) cues from \(url.lastPathComponent)")
             } catch {

@@ -76,6 +76,22 @@ struct BandMemberApp: App {
                     .keyboardShortcut("k", modifiers: .command)
             }
 
+            CommandMenu("Playlist") {
+                Button("Group Selected Tracks") { store.groupSelected() }
+                    .keyboardShortcut("g", modifiers: .command)
+                    .disabled(!store.canGroupSelection)
+                Button("Ungroup") { store.ungroupSelected() }
+                    .keyboardShortcut("g", modifiers: [.command, .shift])
+                    .disabled(!store.canUngroupSelection)
+                Button("Remove from Group") { store.removeSelectedFromGroup() }
+                    .disabled(!store.canRemoveSelectionFromGroup)
+
+                Divider()
+
+                Button("Collapse All Groups") { store.setAllGroupsCollapsed(true) }
+                Button("Expand All Groups") { store.setAllGroupsCollapsed(false) }
+            }
+
             CommandMenu("Playback") {
                 Button("Fade Out & Stop All") {
                     playbackEngine.fadeOutAndStopAll()
@@ -114,7 +130,7 @@ struct BandMemberApp: App {
     private func warnAboutMissingBuses() {
         let known = Set(busStore.buses.map { $0.id })
         let missing = store.items.filter {
-            !$0.isDivider && !known.contains($0.outputRouting.busID)
+            $0.isMedia && !known.contains($0.outputRouting.busID)
         }
         guard !missing.isEmpty else { return }
 
@@ -199,14 +215,14 @@ struct BandMemberApp: App {
             do {
                 let imported = try QLabImporter.importCues(from: url)
                 playbackEngine.stopAll()
-                store.items = []
                 store.currentFilePath = nil
-                for cue in imported {
+                // QLab chains cues with auto-follow; those become groups.
+                store.installConvertingChains(imported.map { cue in
                     var item = PlaylistItem(url: URL(fileURLWithPath: cue.filePath))
                     item.name = cue.name
                     item.autoFollow = cue.autoFollow
-                    store.items.append(item)
-                }
+                    return item
+                })
                 let alert = NSAlert()
                 alert.messageText = "Import Complete"
                 alert.informativeText = "Imported \(imported.count) cues from \(url.lastPathComponent)"
