@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @EnvironmentObject var store: PlaylistStore
     @EnvironmentObject var playbackEngine: PlaybackEngine
+    @EnvironmentObject var bundleExporter: PlaylistBundleExporter
 
     var body: some View {
         HSplitView {
@@ -27,6 +28,19 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .escapePressed)) { _ in
             playbackEngine.fadeOutAndStopAll(duration: 1.0)
+        }
+        .sheet(isPresented: .constant(bundleExporter.isRunning)) {
+            VStack(spacing: 12) {
+                Text("Exporting bundle").font(.headline)
+                ProgressView()
+                Text(bundleExporter.status)
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+                    .monospacedDigit()
+                Button("Cancel") { bundleExporter.cancel() }
+            }
+            .padding(24)
+            .frame(width: 340)
         }
     }
 

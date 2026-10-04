@@ -83,7 +83,13 @@ enum ColorTag: String, Codable, CaseIterable {
 struct PlaylistItem: Identifiable, Codable, Hashable {
     var id: UUID = UUID()
     var name: String
+    /// Absolute path of the media file on this machine.
     var filePath: String
+    /// Only used in the saved file: where the media sits relative to the
+    /// playlist's own folder. It is filled in on save and consumed on load
+    /// (see `PlaylistPaths`), which is what lets a playlist travel to
+    /// another machine together with its files. Always nil in memory.
+    var relativePath: String? = nil
     var mediaType: MediaType
     var targetDisplayIndex: Int = 0
     /// Legacy "play next" flag. Groups replaced it: a playlist saved before
@@ -125,7 +131,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         case id, name, filePath, mediaType, targetDisplayIndex, autoFollow
         case masterVolume, leftVolume, rightVolume, colorTag, outputRouting, showLyrics
         case limiterEnabled, limiterBoostDB
-        case groupID, isGroupHeader, isEnabled
+        case groupID, isGroupHeader, isEnabled, relativePath
     }
 
     static let defaultLimiterBoostDB: Float = 12
@@ -201,6 +207,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         id = try c.decode(UUID.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
         filePath = try c.decode(String.self, forKey: .filePath)
+        relativePath = try c.decodeIfPresent(String.self, forKey: .relativePath)
         // A group header is written as a divider plus a marker, so builds
         // from before groups existed still load the file (they show the
         // header as a plain divider above its tracks).
@@ -230,6 +237,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
         try c.encode(filePath, forKey: .filePath)
+        try c.encodeIfPresent(relativePath, forKey: .relativePath)
         // See `init(from:)`: headers go out as dividers plus a marker.
         try c.encode(isGroup ? MediaType.divider : mediaType, forKey: .mediaType)
         if isGroup { try c.encode(true, forKey: .isGroupHeader) }

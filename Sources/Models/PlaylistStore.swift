@@ -542,6 +542,10 @@ class PlaylistStore: ObservableObject {
     /// for writing to disk: every track of a group but the last gets the
     /// flag, which is exactly how an older build chains them.
     private var itemsWithLegacyChainFlags: [PlaylistItem] {
+        Self.withLegacyChainFlags(items)
+    }
+
+    static func withLegacyChainFlags(_ items: [PlaylistItem]) -> [PlaylistItem] {
         var out = items
         for i in out.indices {
             out[i].autoFollow = out[i].groupID != nil
@@ -616,7 +620,17 @@ class PlaylistStore: ObservableObject {
     // MARK: - Save / Load
 
     func save(to url: URL) throws {
-        let doc = PlaylistDocument(items: itemsWithLegacyChainFlags)
+        // Alongside each absolute path, record where the file sits relative
+        // to the playlist, so the playlist still finds its media if the two
+        // are moved (or copied to another machine) together.
+        let folder = url.deletingLastPathComponent()
+        let doc = PlaylistDocument(items: itemsWithLegacyChainFlags.map { item in
+            var item = item
+            if item.isMedia {
+                item.relativePath = PlaylistPaths.relativePath(from: folder, to: item.filePath)
+            }
+            return item
+        })
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(doc)
@@ -628,7 +642,10 @@ class PlaylistStore: ObservableObject {
 
     func load(from url: URL) throws {
         let data = try Data(contentsOf: url)
-        let doc = try JSONDecoder().decode(PlaylistDocument.self, from: data)
+        var doc = try JSONDecoder().decode(PlaylistDocument.self, from: data)
+        // Settle each item on the path its media is actually at.
+        let folder = url.deletingLastPathComponent()
+        doc.items = doc.items.map { PlaylistPaths.resolved($0, playlistFolder: folder) }
         pushUndo()
         if doc.version < PlaylistDocument.currentVersion {
             // Saved before groups existed: build them from the chains.

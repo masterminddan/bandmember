@@ -22,6 +22,7 @@ A native macOS app for playing synchronized audio and video files in live perfor
 - **Playlist management** - Add, delete, reorder, cut/copy/paste, multi-select (shift/cmd click), color-coded entries, text dividers
 - **QLab import** - Import .qlab5 workspaces with cue names and file paths; auto-follow chains become groups
 - **Save/Load** - JSON-based playlists with auto-restore of last session
+- **Portable playlists** - A saved playlist records where each file sits relative to the playlist as well as its full path, so a playlist copied to another Mac along with its media still finds everything. Export Bundle (Cmd+Shift+E) packs the playlist, its audio and video (in `audio/` and `video/` subfolders) and any lyrics into one zip; unzip it anywhere and open the playlist inside
 - **Live performance ready** - 1-second fade out on escape, spacebar auto-advances to next idle item, dark mode
 
 ## Supported Formats
@@ -41,6 +42,7 @@ A native macOS app for playing synchronized audio and video files in live perfor
 | Cmd+S | Save |
 | Cmd+Shift+S | Save As |
 | Cmd+O | Load playlist |
+| Cmd+Shift+E | Export playlist and media as a zip bundle |
 | Cmd+Shift+I | Import from QLab |
 | Cmd+K | Toggle dark/light mode |
 | Cmd+Opt+M | Edit output bus mappings |

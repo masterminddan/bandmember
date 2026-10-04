@@ -5,6 +5,7 @@ struct BandMemberApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = PlaylistStore()
     @StateObject private var playbackEngine = PlaybackEngine()
+    @StateObject private var bundleExporter = PlaylistBundleExporter()
     @ObservedObject private var audioOut = AudioOutputManager.shared
     @ObservedObject private var busStore = OutputBusStore.shared
     @State private var showMappingEditor = false
@@ -15,6 +16,7 @@ struct BandMemberApp: App {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(playbackEngine)
+                .environmentObject(bundleExporter)
                 .onAppear {
                     playbackEngine.store = store
                     appDelegate.store = store
@@ -62,6 +64,12 @@ struct BandMemberApp: App {
                     loadPlaylist()
                 }
                 .keyboardShortcut("o", modifiers: .command)
+
+                Button("Export Bundle...") {
+                    exportBundle()
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(bundleExporter.isRunning || !store.items.contains(where: \.isMedia))
 
                 Divider()
 
@@ -200,6 +208,44 @@ struct BandMemberApp: App {
         if panel.runModal() == .OK, let url = panel.url {
             playbackEngine.stopAll()
             try? store.load(from: url)
+        }
+    }
+
+    /// Packs the playlist as it currently stands (saved or not) and every
+    /// file it uses into a zip that can be opened on another machine.
+    private func exportBundle() {
+        let baseName = store.currentFilePath?.deletingPathExtension().lastPathComponent ?? "Playlist"
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.zip]
+        panel.nameFieldStringValue = "\(baseName) bundle.zip"
+        panel.message = "Packs the playlist and every audio and video file it uses into one zip."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        bundleExporter.export(items: store.items, to: url) { result in
+            let alert = NSAlert()
+            switch result {
+            case .success(let summary):
+                let size = ByteCountFormatter.string(fromByteCount: summary.byteCount, countStyle: .file)
+                alert.messageText = "Bundle exported"
+                var text = "\(summary.fileCount) files, \(size). On the other Mac, unzip it anywhere and open the playlist inside the folder."
+                if !summary.missing.isEmpty {
+                    text += "\n\nNo file was found for: " + summary.missing.joined(separator: ", ")
+                        + ". These entries are still in the bundled playlist, in their usual places, and show as missing."
+                }
+                alert.informativeText = text
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "Show in Finder")
+                alert.addButton(withTitle: "OK")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+            case .failure(let error):
+                if error is PlaylistBundle.Cancelled { return }
+                alert.messageText = "Export failed"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
         }
     }
 
