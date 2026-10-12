@@ -52,8 +52,8 @@ struct ShowClockBar: View {
             Button(action: { showClock.reset() }) {
                 Label("Reset", systemImage: "arrow.counterclockwise")
             }
-            .disabled(!showClock.hasStarted && showClock.playedEntryIDs.isEmpty)
-            .help("Back to the full show length, with nothing played (⇧⌘T)")
+            .disabled(!showClock.hasStarted)
+            .help("Back to the full show length (⇧⌘T)")
         }
         .buttonStyle(.bordered)
         .padding(.horizontal, 10)
@@ -127,11 +127,12 @@ struct ShowClockBar: View {
             .foregroundColor(.secondary)
     }
 
-    /// "6 of 10 songs", plus a note when some lengths are unknown.
+    /// "6 of 10 songs", from the selected one down, plus a note when some
+    /// lengths are unknown.
     private func musicDetail(_ status: ShowClock.Status) -> String {
-        var text = showClock.hasStarted
-            ? "\(status.songsLeft) of \(status.songsTotal) songs left"
-            : (status.songsTotal == 1 ? "1 song" : "\(status.songsTotal) songs")
+        var text = status.songsLeft == status.songsTotal
+            ? (status.songsTotal == 1 ? "1 song" : "\(status.songsTotal) songs")
+            : "\(status.songsLeft) of \(status.songsTotal) songs"
         if status.unknownCount > 0 {
             text += " · \(status.unknownCount) unknown length"
         }

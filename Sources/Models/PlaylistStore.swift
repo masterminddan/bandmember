@@ -116,6 +116,8 @@ class PlaylistStore: ObservableObject {
     struct SetEntry: Identifiable {
         let id: UUID
         let name: String
+        /// Row of the header (or of the loose track) in `items`.
+        let index: Int
         let tracks: [PlaylistItem]
     }
 
@@ -143,27 +145,18 @@ class PlaylistStore: ObservableObject {
                 if item.isEnabled {
                     let tracks = items[members].filter(\.isEnabled)
                     if !tracks.isEmpty {
-                        entries.append(SetEntry(id: item.id, name: item.name, tracks: tracks))
+                        entries.append(SetEntry(id: item.id, name: item.name, index: i, tracks: tracks))
                     }
                 }
                 i = max(members.upperBound, i + 1)
             } else {
                 if item.isMedia, item.isEnabled, item.groupID == nil {
-                    entries.append(SetEntry(id: item.id, name: item.name, tracks: [item]))
+                    entries.append(SetEntry(id: item.id, name: item.name, index: i, tracks: [item]))
                 }
                 i += 1
             }
         }
         return entries
-    }
-
-    /// The set entry the row at `index` belongs to — a group's header ID for
-    /// the header and its tracks, a loose track's own ID — or nil for rows
-    /// outside the set and for dividers.
-    func setEntryID(forItemAt index: Int) -> UUID? {
-        guard let range = setRange, range.contains(index), !items[index].isDivider else { return nil }
-        if let header = groupHeaderIndex(forItemAt: index) { return items[header].id }
-        return items[index].id
     }
 
     /// Makes the divider with `id` the one that starts (or ends) the set,

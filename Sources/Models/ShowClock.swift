@@ -1,12 +1,13 @@
-import Combine
 import Foundation
 
 /// Times the set against the show's slot. Start it when the show starts;
-/// from then on it counts the slot down and, as each song of the set is
-/// triggered, marks it played so the music still to come keeps shrinking.
-/// The buffer is what's left of the slot once the remaining music has been
-/// played back to back — the breathing room for talking between songs. It
-/// goes negative, and stays negative, once the show runs over.
+/// from then on it counts the slot down. The music still to come is read
+/// off the selection: the spacebar leaves the next song selected after
+/// each one it fires, so the selected song and everything below it in the
+/// set are still to play, plus the rest of whatever is playing now. The
+/// buffer is what's left of the slot once that music has been played back
+/// to back — the breathing room for talking between songs. It goes
+/// negative, and stays negative, once the show runs over.
 final class ShowClock: ObservableObject {
     static let defaultShowLength: TimeInterval = 30 * 60
 
@@ -14,13 +15,9 @@ final class ShowClock: ObservableObject {
     @Published private(set) var runningSince: Date?
     /// Time on the clock accumulated before the current run.
     @Published private(set) var elapsedBeforeRun: TimeInterval = 0
-    /// Songs of the set (by entry ID, see `PlaylistStore.setEntries`)
-    /// played since the clock was last reset.
-    @Published private(set) var playedEntryIDs: Set<UUID> = []
 
     private weak var store: PlaylistStore?
     private weak var engine: PlaybackEngine?
-    private var playingCancellable: AnyCancellable?
 
     var isRunning: Bool { runningSince != nil }
     /// True from the first start until the next reset.
@@ -29,21 +26,6 @@ final class ShowClock: ObservableObject {
     func attach(store: PlaylistStore, engine: PlaybackEngine) {
         self.store = store
         self.engine = engine
-        // Watch for songs starting. Only the ones that start while the
-        // clock runs count as played — a sound check before the show
-        // doesn't use up the set.
-        playingCancellable = store.$playingItemIDs
-            .scan((previous: Set<UUID>(), current: Set<UUID>())) { ($0.current, $1) }
-            .sink { [weak self] pair in
-                self?.notePlaying(pair.current.subtracting(pair.previous))
-            }
-    }
-
-    private func notePlaying(_ trackIDs: Set<UUID>) {
-        guard isRunning, !trackIDs.isEmpty, let store else { return }
-        for entry in store.setEntries where entry.tracks.contains(where: { trackIDs.contains($0.id) }) {
-            playedEntryIDs.insert(entry.id)
-        }
     }
 
     func elapsed(at now: Date = Date()) -> TimeInterval {
@@ -53,8 +35,6 @@ final class ShowClock: ObservableObject {
     func start() {
         guard !isRunning else { return }
         runningSince = Date()
-        // Whatever is already playing is part of the show.
-        if let store { notePlaying(store.playingItemIDs) }
     }
 
     func pause() {
@@ -70,11 +50,6 @@ final class ShowClock: ObservableObject {
     func reset() {
         runningSince = nil
         elapsedBeforeRun = 0
-        playedEntryIDs = []
-    }
-
-    func setPlayed(_ played: Bool, entryID: UUID) {
-        if played { playedEntryIDs.insert(entryID) } else { playedEntryIDs.remove(entryID) }
     }
 
     // MARK: - Status
@@ -84,13 +59,15 @@ final class ShowClock: ObservableObject {
         var elapsed: TimeInterval
         /// Slot time left. Negative once the show runs over.
         var remaining: TimeInterval { showLength - elapsed }
-        /// Music still to be played in the set, back to back: the unplayed
-        /// songs in full plus the rest of whatever is playing now.
+        /// Music still to be played in the set, back to back: the selected
+        /// song and those below it in full, plus the rest of whatever is
+        /// playing now.
         var musicLeft: TimeInterval
         /// Slot time left over after the remaining music. Negative means
         /// the set no longer fits even without a break.
         var buffer: TimeInterval { remaining - musicLeft }
-        /// Songs of the set not yet started.
+        /// Songs of the set from the selection down (not counting one that
+        /// is already playing).
         var songsLeft: Int
         var songsTotal: Int
         /// Songs left out of `musicLeft` because no length is known for
@@ -108,12 +85,12 @@ final class ShowClock: ObservableObject {
         guard let store else { return status }
         status.hasSet = store.setRange != nil
         let durations = MediaDurationCache.shared
+        let cutoff = stillToComeCutoff(in: store)
         for entry in store.setEntries {
             status.songsTotal += 1
             let playing = entry.tracks.filter { store.playingItemIDs.contains($0.id) }
             if !playing.isEmpty {
-                // The rest of what is playing. Lengths are known here: the
-                // file opened, so the cache will have read it too.
+                // The rest of what is playing, however it was selected.
                 let left = playing.compactMap { track -> Double? in
                     guard let length = durations.duration(forPath: track.filePath) else { return nil }
                     let position = engine?.currentTime(for: track.id) ?? 0
@@ -124,10 +101,7 @@ final class ShowClock: ObservableObject {
                 } else {
                     status.unknownCount += 1
                 }
-                if !playedEntryIDs.contains(entry.id) { status.songsLeft += 1 }
-            } else if playedEntryIDs.contains(entry.id) {
-                continue
-            } else {
+            } else if entry.index >= cutoff {
                 status.songsLeft += 1
                 if let length = durations.duration(of: entry.tracks) {
                     status.musicLeft += length
@@ -137,6 +111,16 @@ final class ShowClock: ObservableObject {
             }
         }
         return status
+    }
+
+    /// Row index from which set entries count as still to come: the
+    /// selected row (its group's header if it is a track in a group). With
+    /// nothing selected, or the selection above the set, the whole set is
+    /// still to come; a selection below the set leaves nothing.
+    private func stillToComeCutoff(in store: PlaylistStore) -> Int {
+        guard let selected = store.firstSelectedIndex, let range = store.setRange else { return Int.min }
+        if selected < range.lowerBound { return Int.min }
+        return store.groupHeaderIndex(forItemAt: selected) ?? selected
     }
 
     // MARK: - Formatting

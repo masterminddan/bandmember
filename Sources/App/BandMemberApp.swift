@@ -122,7 +122,7 @@ struct BandMemberApp: App {
                 }
                 Button("Reset Show Clock") { showClock.reset() }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
-                    .disabled(!showClock.hasStarted && showClock.playedEntryIDs.isEmpty)
+                    .disabled(!showClock.hasStarted)
             }
 
             CommandMenu("Audio") {
