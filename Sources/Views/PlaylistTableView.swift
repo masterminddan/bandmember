@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct PlaylistTableView: View {
     @EnvironmentObject var store: PlaylistStore
     @EnvironmentObject var playbackEngine: PlaybackEngine
+    @EnvironmentObject var showClock: ShowClock
 
     /// Highlights the list while a droppable file hovers over it.
     @State private var isDropTargeted = false
@@ -100,7 +101,9 @@ struct PlaylistTableView: View {
                         || row.members.contains { store.playingItemIDs.contains($0.id) },
                     group: row.group,
                     members: row.members,
-                    groupEnabled: row.groupEnabled
+                    groupEnabled: row.groupEnabled,
+                    playedInShow: store.setEntryID(forItemAt: row.index)
+                        .map { showClock.playedEntryIDs.contains($0) } ?? false
                 )
                 .tag(item.id)
                 .listRowBackground(rowBackground(for: item))
@@ -152,6 +155,24 @@ struct PlaylistTableView: View {
     @ViewBuilder
     private func contextMenu(for row: Row) -> some View {
         let item = row.item
+        if item.isDivider {
+            // Where the set the show clock times starts and ends.
+            ForEach([DividerRole.setStart, .setEnd], id: \.self) { role in
+                Toggle(role == .setStart ? "Set Starts Here" : "Set Ends Here", isOn: Binding(
+                    get: { item.dividerRole == role },
+                    set: { store.setDividerRole($0 ? role : .none, id: item.id) }
+                ))
+            }
+            Divider()
+        }
+        if let entryID = store.setEntryID(forItemAt: row.index) {
+            let played = showClock.playedEntryIDs.contains(entryID)
+            Button(played ? "Mark as Not Played" : "Mark as Played") {
+                showClock.setPlayed(!played, entryID: entryID)
+            }
+            .help("Whether the show clock counts this song as still to come")
+            Divider()
+        }
         if !item.isDivider {
             Button(item.isGroup ? "Play Group" : "Play") { playbackEngine.play(item: item) }
                 .disabled(store.playSet(for: item).isEmpty)
@@ -280,7 +301,10 @@ struct PlaylistRowView: View {
     var members: [PlaylistItem] = []
     /// False for a track whose group header is disabled.
     var groupEnabled = true
+    /// True for a song of the set that the show clock has seen played.
+    var playedInShow = false
     @EnvironmentObject var store: PlaylistStore
+    @ObservedObject private var durations = MediaDurationCache.shared
 
     /// Dimmed when the entry won't play: unchecked itself, or inside an
     /// unchecked group.
@@ -316,7 +340,16 @@ struct PlaylistRowView: View {
     }
 
     private var dividerRow: some View {
-        HStack {
+        HStack(spacing: 6) {
+            if let icon = item.dividerRole.icon, let label = item.dividerRole.rowLabel {
+                Image(systemName: icon)
+                    .font(.caption)
+                    .foregroundColor(item.dividerRole == .setStart ? .green : .red)
+                Text(label)
+                    .font(.caption2.bold())
+                    .foregroundColor(item.dividerRole == .setStart ? .green : .red)
+                Text("·").foregroundColor(.secondary).font(.caption)
+            }
             Text(item.name)
                 .font(.caption.bold())
                 .foregroundColor(.secondary)
@@ -324,6 +357,29 @@ struct PlaylistRowView: View {
                 .lineLimit(1)
         }
         .padding(.vertical, 4)
+    }
+
+    /// Length of the row's media (the longest track for a group), once
+    /// read. Dimmed like the rest of a disabled row.
+    @ViewBuilder
+    private func durationLabel(for items: [PlaylistItem]) -> some View {
+        if let seconds = durations.duration(of: items) {
+            Text(ShowClock.format(seconds))
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .monospacedDigit()
+        }
+    }
+
+    /// Tick on a song of the set that has already been played this show.
+    @ViewBuilder
+    private var playedMark: some View {
+        if playedInShow {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(.green)
+                .font(.caption)
+                .help("Played this show")
+        }
     }
 
     private var playingIndicator: some View {
@@ -393,6 +449,9 @@ struct PlaylistRowView: View {
                     .font(.caption)
                     .help("File not found for: " + missing.map(\.name).joined(separator: ", "))
             }
+
+            playedMark
+            durationLabel(for: members.filter(\.isEnabled))
         }
     }
 
@@ -447,6 +506,9 @@ struct PlaylistRowView: View {
                     .font(.caption)
                     .help("File not found: \(item.filePath)")
             }
+
+            if !isMember { playedMark }
+            durationLabel(for: [item])
         }
     }
 

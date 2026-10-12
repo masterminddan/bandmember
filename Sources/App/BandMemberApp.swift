@@ -6,6 +6,7 @@ struct BandMemberApp: App {
     @StateObject private var store = PlaylistStore()
     @StateObject private var playbackEngine = PlaybackEngine()
     @StateObject private var bundleExporter = PlaylistBundleExporter()
+    @StateObject private var showClock = ShowClock()
     @ObservedObject private var audioOut = AudioOutputManager.shared
     @ObservedObject private var busStore = OutputBusStore.shared
     @State private var showMappingEditor = false
@@ -17,14 +18,19 @@ struct BandMemberApp: App {
                 .environmentObject(store)
                 .environmentObject(playbackEngine)
                 .environmentObject(bundleExporter)
+                .environmentObject(showClock)
                 .onAppear {
                     playbackEngine.store = store
+                    showClock.attach(store: store, engine: playbackEngine)
                     appDelegate.store = store
                     TempoCoordinator.shared.attach(to: store)
                     store.restoreLastSession()
                     warnAboutMissingBuses()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .playlistDidLoad)) { _ in
+                    // A different playlist is a different show.
+                    showClock.reset()
+                    MediaDurationCache.shared.invalidate()
                     warnAboutMissingBuses()
                 }
                 .sheet(isPresented: $showMappingEditor) {
@@ -40,6 +46,7 @@ struct BandMemberApp: App {
                 Button("New Playlist") {
                     playbackEngine.stopAll()
                     store.newPlaylist()
+                    showClock.reset()
                 }
                 .keyboardShortcut("n", modifiers: .command)
 
@@ -105,6 +112,17 @@ struct BandMemberApp: App {
                     playbackEngine.fadeOutAndStopAll()
                 }
                 .keyboardShortcut(.escape, modifiers: [])
+
+                Divider()
+
+                // ⌘T is on the bar's own button, so the menu item would
+                // double up the shortcut; it is listed here without one.
+                Button(showClock.isRunning ? "Pause Show Clock" : "Start Show Clock") {
+                    showClock.toggle()
+                }
+                Button("Reset Show Clock") { showClock.reset() }
+                    .keyboardShortcut("t", modifiers: [.command, .shift])
+                    .disabled(!showClock.hasStarted && showClock.playedEntryIDs.isEmpty)
             }
 
             CommandMenu("Audio") {

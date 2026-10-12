@@ -411,6 +411,26 @@ struct ItemInspectorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 nameField(for: index)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker("Set marker", selection: Binding(
+                        get: { store.items[safe: index]?.dividerRole ?? .none },
+                        set: { newRole in
+                            guard let id = store.items[safe: index]?.id else { return }
+                            store.setDividerRole(newRole, id: id)
+                        }
+                    )) {
+                        ForEach(DividerRole.allCases, id: \.self) { role in
+                            Text(role.displayName).tag(role)
+                        }
+                    }
+                    Text("The show clock times the songs between the divider that starts the set and the one that ends it. Songs kept outside those dividers don't count.")
+                        .font(.caption2).foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+
                 ColorTagPicker(
                     value: store.items[safe: index]?.colorTag ?? .none,
                     onChange: { newTag in

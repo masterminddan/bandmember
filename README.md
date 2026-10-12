@@ -19,7 +19,8 @@ A native macOS app for playing synchronized audio and video files in live perfor
 - **Lyric editor** - Double-click a line to rewrite its text, double-click a timestamp to edit it directly, ← / → to nudge ±100 ms with adjacent-line carry, trash to delete a line
 - **Fix Lyrics** - Paste corrected lyrics and keep the existing timestamps; word-set alignment handles line-break differences
 - **Undo / redo** - Cmd+Z / Cmd+Shift+Z across all playlist edits, with a 50-level history
-- **Playlist management** - Add, delete, reorder, cut/copy/paste, multi-select (shift/cmd click), color-coded entries, text dividers
+- **Playlist management** - Add, delete, reorder, cut/copy/paste, multi-select (shift/cmd click), color-coded entries, text dividers. Every track and group shows its length
+- **Show clock** - For shows with a hard time limit. Mark the set with two dividers (right-click a divider, or use its inspector: "Set Starts Here" / "Set Ends Here"); songs kept above or below those dividers stay in the file for copy-and-paste but don't count. The bar under the playlist takes the show's length (saved with the playlist), counts it down from Start (⌘T), and shows the music left in the set and the buffer: the slot time left over if the rest of the set were played back to back, which is how much talking between songs you can afford. Songs triggered while the clock runs are ticked off (right-click a song to mark it played or not played by hand); a disabled song is out of the set. Both the countdown and the buffer go negative and keep counting once the show runs over. ⇧⌘T resets
 - **QLab import** - Import .qlab5 workspaces with cue names and file paths; auto-follow chains become groups
 - **Save/Load** - JSON-based playlists with auto-restore of last session
 - **Portable playlists** - A saved playlist records where each file sits relative to the playlist as well as its full path, so a playlist copied to another Mac along with its media still finds everything. Export Bundle (Cmd+Shift+E) packs the playlist, its audio and video (in `audio/` and `video/` subfolders) and any lyrics into one zip; unzip it anywhere and open the playlist inside
@@ -51,6 +52,8 @@ A native macOS app for playing synchronized audio and video files in live perfor
 | Cmd+D | Add media files |
 | Cmd+G | Group selected tracks |
 | Cmd+Shift+G | Ungroup |
+| Cmd+T | Start / pause the show clock |
+| Cmd+Shift+T | Reset the show clock |
 
 ## Building
 

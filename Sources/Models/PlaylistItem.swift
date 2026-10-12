@@ -67,6 +67,40 @@ struct OutputRouting: Codable, Hashable {
     }
 }
 
+/// What a divider marks beyond labelling a section. The set the show clock
+/// times runs from the divider that starts it to the one that ends it, so
+/// songs kept above and below those dividers stay out of the count.
+enum DividerRole: String, Codable, CaseIterable {
+    case none
+    case setStart
+    case setEnd
+
+    var displayName: String {
+        switch self {
+        case .none: return "None"
+        case .setStart: return "Set starts here"
+        case .setEnd: return "Set ends here"
+        }
+    }
+
+    var icon: String? {
+        switch self {
+        case .none: return nil
+        case .setStart: return "flag.fill"
+        case .setEnd: return "flag.checkered"
+        }
+    }
+
+    /// Short tag shown on the divider's row.
+    var rowLabel: String? {
+        switch self {
+        case .none: return nil
+        case .setStart: return "SET STARTS"
+        case .setEnd: return "SET ENDS"
+        }
+    }
+}
+
 /// Predefined color tags for playlist items.
 enum ColorTag: String, Codable, CaseIterable {
     case none
@@ -108,6 +142,8 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
     var leftVolume: Float = 1.0
     var rightVolume: Float = 1.0
     var colorTag: ColorTag = .none
+    /// For a divider, whether it marks where the set starts or ends.
+    var dividerRole: DividerRole = .none
     var outputRouting: OutputRouting = .defaultRouting
     /// When true, the cue is raised by `limiterBoostDB` and limited back to
     /// its original peak level before the volume controls — quiet passages
@@ -132,6 +168,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         case masterVolume, leftVolume, rightVolume, colorTag, outputRouting, showLyrics
         case limiterEnabled, limiterBoostDB
         case groupID, isGroupHeader, isEnabled, relativePath
+        case dividerRole
     }
 
     static let defaultLimiterBoostDB: Float = 12
@@ -191,6 +228,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
             && lhs.leftVolume == rhs.leftVolume
             && lhs.rightVolume == rhs.rightVolume
             && lhs.colorTag == rhs.colorTag
+            && lhs.dividerRole == rhs.dividerRole
             && lhs.outputRouting == rhs.outputRouting
             && lhs.showLyrics == rhs.showLyrics
             && lhs.limiterEnabled == rhs.limiterEnabled
@@ -222,6 +260,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         leftVolume = try c.decodeIfPresent(Float.self, forKey: .leftVolume) ?? 1.0
         rightVolume = try c.decodeIfPresent(Float.self, forKey: .rightVolume) ?? 1.0
         colorTag = try c.decodeIfPresent(ColorTag.self, forKey: .colorTag) ?? .none
+        dividerRole = try c.decodeIfPresent(DividerRole.self, forKey: .dividerRole) ?? .none
         outputRouting = try c.decodeIfPresent(OutputRouting.self, forKey: .outputRouting)
             ?? .defaultRouting
         showLyrics = try c.decodeIfPresent(Bool.self, forKey: .showLyrics) ?? false
@@ -249,6 +288,7 @@ struct PlaylistItem: Identifiable, Codable, Hashable {
         try c.encode(leftVolume, forKey: .leftVolume)
         try c.encode(rightVolume, forKey: .rightVolume)
         try c.encode(colorTag, forKey: .colorTag)
+        if dividerRole != .none { try c.encode(dividerRole, forKey: .dividerRole) }
         try c.encode(outputRouting, forKey: .outputRouting)
         try c.encode(showLyrics, forKey: .showLyrics)
         try c.encode(limiterEnabled, forKey: .limiterEnabled)
@@ -263,4 +303,7 @@ struct PlaylistDocument: Codable {
 
     var items: [PlaylistItem]
     var version: Int = PlaylistDocument.currentVersion
+    /// How long the show is allowed to run, for the show clock. Absent in
+    /// playlists saved before the clock existed.
+    var showLengthSeconds: Double? = nil
 }

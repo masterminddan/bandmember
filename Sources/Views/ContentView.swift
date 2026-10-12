@@ -12,6 +12,8 @@ struct ContentView: View {
                 toolbar
                 Divider()
                 PlaylistTableView()
+                Divider()
+                ShowClockBar()
             }
             .frame(minWidth: 400)
 

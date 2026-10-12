@@ -21,6 +21,11 @@ class PlaylistStore: ObservableObject {
     @Published var currentFilePath: URL? = nil
     private var savedSnapshot: [PlaylistItem] = []
 
+    /// How long the show may run, for the show clock. Saved with the
+    /// playlist, since it belongs to the booking rather than the machine.
+    @Published var showLengthSeconds: Double = ShowClock.defaultShowLength
+    private var savedShowLength: Double = ShowClock.defaultShowLength
+
     /// Mirrors `selectedIDs` to `UserDefaults` on every change so the
     /// selection survives across launches. Restored by `restoreLastSession`
     /// after the playlist itself loads.
@@ -90,7 +95,7 @@ class PlaylistStore: ObservableObject {
     // MARK: - Computed
 
     var hasUnsavedChanges: Bool {
-        items != savedSnapshot
+        items != savedSnapshot || showLengthSeconds != savedShowLength
     }
 
     var firstSelectedItem: PlaylistItem? {
@@ -102,6 +107,77 @@ class PlaylistStore: ObservableObject {
 
     var firstSelectedIndex: Int? {
         items.firstIndex { selectedIDs.contains($0.id) }
+    }
+
+    // MARK: - The set
+
+    /// One song of the set as the show clock counts it: a group (with its
+    /// enabled tracks) or a loose track. `id` is the header's for a group.
+    struct SetEntry: Identifiable {
+        let id: UUID
+        let name: String
+        let tracks: [PlaylistItem]
+    }
+
+    /// Rows of the set: from just after the divider marked as where the set
+    /// starts up to the divider marked as where it ends, or the end of the
+    /// list if there isn't one. Nil when no divider starts the set.
+    var setRange: Range<Int>? {
+        guard let start = items.firstIndex(where: { $0.isDivider && $0.dividerRole == .setStart }) else {
+            return nil
+        }
+        let end = items[(start + 1)...].firstIndex { $0.isDivider && $0.dividerRole == .setEnd } ?? items.count
+        return (start + 1)..<end
+    }
+
+    /// The songs of the set, in order. Disabled groups and tracks are left
+    /// out, as are dividers and groups with nothing enabled in them.
+    var setEntries: [SetEntry] {
+        guard let range = setRange else { return [] }
+        var entries: [SetEntry] = []
+        var i = range.lowerBound
+        while i < range.upperBound {
+            let item = items[i]
+            if item.isGroup {
+                let members = memberRange(ofGroupAt: i)
+                if item.isEnabled {
+                    let tracks = items[members].filter(\.isEnabled)
+                    if !tracks.isEmpty {
+                        entries.append(SetEntry(id: item.id, name: item.name, tracks: tracks))
+                    }
+                }
+                i = max(members.upperBound, i + 1)
+            } else {
+                if item.isMedia, item.isEnabled, item.groupID == nil {
+                    entries.append(SetEntry(id: item.id, name: item.name, tracks: [item]))
+                }
+                i += 1
+            }
+        }
+        return entries
+    }
+
+    /// The set entry the row at `index` belongs to — a group's header ID for
+    /// the header and its tracks, a loose track's own ID — or nil for rows
+    /// outside the set and for dividers.
+    func setEntryID(forItemAt index: Int) -> UUID? {
+        guard let range = setRange, range.contains(index), !items[index].isDivider else { return nil }
+        if let header = groupHeaderIndex(forItemAt: index) { return items[header].id }
+        return items[index].id
+    }
+
+    /// Makes the divider with `id` the one that starts (or ends) the set,
+    /// taking the role away from whichever divider had it. `.none` clears it.
+    func setDividerRole(_ role: DividerRole, id: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == id }),
+              items[index].isDivider, items[index].dividerRole != role else { return }
+        pushUndo()
+        var updated = items
+        if role != .none {
+            for i in updated.indices where updated[i].dividerRole == role { updated[i].dividerRole = .none }
+        }
+        updated[index].dividerRole = role
+        items = updated
     }
 
     // MARK: - Groups
@@ -612,6 +688,8 @@ class PlaylistStore: ObservableObject {
         pushUndo()
         items = []
         savedSnapshot = []
+        showLengthSeconds = ShowClock.defaultShowLength
+        savedShowLength = showLengthSeconds
         selectedIDs = []
         playingItemIDs = []
         currentFilePath = nil
@@ -630,13 +708,14 @@ class PlaylistStore: ObservableObject {
                 item.relativePath = PlaylistPaths.relativePath(from: folder, to: item.filePath)
             }
             return item
-        })
+        }, showLengthSeconds: showLengthSeconds)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(doc)
         try data.write(to: url)
         currentFilePath = url
         savedSnapshot = items
+        savedShowLength = showLengthSeconds
         UserDefaults.standard.set(url.path, forKey: kLastPlaylistPath)
     }
 
@@ -659,6 +738,8 @@ class PlaylistStore: ObservableObject {
             }
         }
         savedSnapshot = items
+        showLengthSeconds = doc.showLengthSeconds ?? ShowClock.defaultShowLength
+        savedShowLength = showLengthSeconds
         selectedIDs = []
         playingItemIDs = []
         currentFilePath = url
