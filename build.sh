@@ -72,6 +72,11 @@ cat > "${CONTENTS_DIR}/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
+# Stamp each build with its own build number. macOS caches an app's icon
+# by bundle ID and CFBundleVersion, so with a fixed "1.0" a new icon never
+# shows up in the Dock or Finder until the cache is cleared by hand.
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(date +%Y%m%d.%H%M%S)" "${CONTENTS_DIR}/Info.plist"
+
 echo ""
 echo "Build complete!"
 echo "App bundle: ${BUNDLE_DIR}"
