@@ -139,11 +139,8 @@ struct ShowClockBar: View {
         return text
     }
 
-    /// Red once the set no longer fits, orange with under two minutes of
-    /// room, green otherwise.
+    /// Red once the set no longer fits, green while there is any room left.
     private func bufferColor(_ buffer: TimeInterval) -> Color {
-        if buffer < 0 { return .red }
-        if buffer < 120 { return .orange }
-        return .green
+        buffer < 0 ? .red : .green
     }
 }
