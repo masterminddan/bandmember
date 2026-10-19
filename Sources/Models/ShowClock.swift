@@ -11,6 +11,31 @@ import Foundation
 final class ShowClock: ObservableObject {
     static let defaultShowLength: TimeInterval = 30 * 60
 
+    /// How the slot is given: as a length the clock counts down from
+    /// Start, or as the time of day the set has to be over by, which the
+    /// wall clock counts down to on its own.
+    enum Mode: String, Codable, CaseIterable {
+        case length
+        case endTime
+    }
+
+    /// What the clock is set to. Saved with the playlist.
+    struct Settings: Equatable {
+        var mode: Mode = .length
+        var length: TimeInterval = ShowClock.defaultShowLength
+        /// The end time as seconds after local midnight; nil until one is
+        /// typed. With none set, end-time mode falls back to the length.
+        var endTime: TimeInterval? = nil
+
+        /// The end time as a date: the occurrence of that time of day
+        /// closest to `now`, so a set that ends just after midnight still
+        /// reads right at a quarter to twelve.
+        func endDate(near now: Date) -> Date? {
+            guard mode == .endTime, let endTime else { return nil }
+            return ShowClock.date(atSecondsAfterMidnight: endTime, nearest: now)
+        }
+    }
+
     /// When the clock was last started; nil while it is stopped.
     @Published private(set) var runningSince: Date?
     /// Time on the clock accumulated before the current run.
@@ -55,10 +80,12 @@ final class ShowClock: ObservableObject {
     // MARK: - Status
 
     struct Status {
-        var showLength: TimeInterval
-        var elapsed: TimeInterval
-        /// Slot time left. Negative once the show runs over.
-        var remaining: TimeInterval { showLength - elapsed }
+        var mode: Mode
+        /// In end-time mode, when the set has to be over.
+        var endDate: Date?
+        /// Slot time left: the length less the time on the clock, or the
+        /// time until the end time. Negative once the show runs over.
+        var remaining: TimeInterval
         /// Music still to be played in the set, back to back: the selected
         /// song and those below it in full, plus the rest of whatever is
         /// playing now.
@@ -78,9 +105,11 @@ final class ShowClock: ObservableObject {
     }
 
     func status(at now: Date = Date()) -> Status {
-        let showLength = store?.showLengthSeconds ?? Self.defaultShowLength
-        var status = Status(showLength: showLength, elapsed: elapsed(at: now),
-                            musicLeft: 0, songsLeft: 0, songsTotal: 0,
+        let settings = store?.clockSettings ?? Settings()
+        let endDate = settings.endDate(near: now)
+        let remaining = endDate.map { $0.timeIntervalSince(now) } ?? (settings.length - elapsed(at: now))
+        var status = Status(mode: endDate == nil ? .length : .endTime, endDate: endDate,
+                            remaining: remaining, musicLeft: 0, songsLeft: 0, songsTotal: 0,
                             unknownCount: 0, hasSet: false)
         guard let store else { return status }
         status.hasSet = store.setRange != nil
@@ -121,6 +150,84 @@ final class ShowClock: ObservableObject {
         guard let selected = store.firstSelectedIndex, let range = store.setRange else { return Int.min }
         if selected < range.lowerBound { return Int.min }
         return store.groupHeaderIndex(forItemAt: selected) ?? selected
+    }
+
+    // MARK: - Times of day
+
+    /// The date on which the time of day `seconds` after midnight falls
+    /// closest to `now`: today, or yesterday or tomorrow if that is nearer.
+    static func date(atSecondsAfterMidnight seconds: TimeInterval, nearest now: Date) -> Date {
+        let calendar = Calendar.current
+        let total = Int(seconds.rounded())
+        let candidates = (-1...1).compactMap { offset -> Date? in
+            guard let day = calendar.date(byAdding: .day, value: offset, to: now) else { return nil }
+            return calendar.date(bySettingHour: (total / 3600) % 24, minute: (total % 3600) / 60,
+                                 second: total % 60, of: day)
+        }
+        return candidates.min { abs($0.timeIntervalSince(now)) < abs($1.timeIntervalSince(now)) } ?? now
+    }
+
+    /// Seconds after local midnight of `date`.
+    static func secondsAfterMidnight(of date: Date) -> TimeInterval {
+        let parts = Calendar.current.dateComponents([.hour, .minute, .second], from: date)
+        let hours = parts.hour ?? 0, minutes = parts.minute ?? 0, seconds = parts.second ?? 0
+        return TimeInterval(hours * 3600 + minutes * 60 + seconds)
+    }
+
+    /// "7:15 PM" (or "19:15" where the clock is 24-hour).
+    static func formatTimeOfDay(_ seconds: TimeInterval, now: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return formatter.string(from: date(atSecondsAfterMidnight: seconds, nearest: now))
+    }
+
+    /// Reads a time of day typed as "7:15pm", "7:15 PM", "715pm", "7pm",
+    /// "19:15" or "7:15:30". Without am or pm, an hour up to 12 is taken as
+    /// the next time that hour comes round, so "7:15" typed in the
+    /// afternoon means the evening. Returns seconds after midnight, or nil
+    /// when it doesn't parse.
+    static func parseTimeOfDay(_ text: String, now: Date = Date()) -> TimeInterval? {
+        var body = text.lowercased().filter { !$0.isWhitespace && $0 != "." }
+        var meridiem: String? = nil
+        for suffix in ["am", "pm", "a", "p"] where body.hasSuffix(suffix) {
+            meridiem = String(suffix.prefix(1))
+            body.removeLast(suffix.count)
+            break
+        }
+        guard !body.isEmpty else { return nil }
+        var fields: [Int]
+        if body.contains(":") {
+            let parts = body.split(separator: ":", omittingEmptySubsequences: false).map { Int($0) }
+            guard parts.allSatisfy({ $0 != nil }), (2...3).contains(parts.count) else { return nil }
+            fields = parts.map { $0! }
+        } else {
+            // Digits only: "7", "19", "715", "1915".
+            guard let number = Int(body), body.count <= 4 else { return nil }
+            fields = body.count <= 2 ? [number] : [number / 100, number % 100]
+        }
+        var hour = fields[0]
+        let minute = fields.count > 1 ? fields[1] : 0
+        let second = fields.count > 2 ? fields[2] : 0
+        guard (0...59).contains(minute), (0...59).contains(second) else { return nil }
+        switch meridiem {
+        case "a":
+            guard (1...12).contains(hour) else { return nil }
+            hour %= 12
+        case "p":
+            guard (1...12).contains(hour) else { return nil }
+            hour = hour % 12 + 12
+        default:
+            guard (0...23).contains(hour) else { return nil }
+            if (1...12).contains(hour) {
+                // Ambiguous: the next time that reading comes round.
+                let morning = TimeInterval((hour % 12) * 3600 + minute * 60 + second)
+                let current = secondsAfterMidnight(of: now)
+                let evening = morning + 12 * 3600
+                if current >= morning && current < evening { return evening }
+                return morning
+            }
+        }
+        return TimeInterval(hour * 3600 + minute * 60 + second)
     }
 
     // MARK: - Formatting

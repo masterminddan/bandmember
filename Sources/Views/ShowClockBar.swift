@@ -1,9 +1,9 @@
 import SwiftUI
 import AppKit
 
-/// The strip under the playlist that times the show: the length of the
-/// slot, the countdown, the music left in the set and the buffer between
-/// the two. See `ShowClock`.
+/// The strip under the playlist that times the show: the slot (as a
+/// length, or as the time it ends), the countdown, the music left in the
+/// set and the buffer between the two. See `ShowClock`.
 struct ShowClockBar: View {
     @EnvironmentObject var store: PlaylistStore
     @EnvironmentObject var showClock: ShowClock
@@ -11,16 +11,20 @@ struct ShowClockBar: View {
     @ObservedObject private var durations = MediaDurationCache.shared
 
     @State private var now = Date()
-    @State private var lengthText = ""
-    @State private var editingLength = false
+    @State private var slotText = ""
+    @State private var editingSlot = false
     private let ticker = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
         let status = showClock.status(at: now)
         HStack(spacing: 16) {
-            showLengthField
+            slotField
 
             Divider().frame(height: 32)
+
+            if status.mode == .endTime {
+                readout("Now", value: timeOfDay(now), color: .secondary)
+            }
 
             readout("Remaining", value: ShowClock.format(status.remaining),
                     color: status.remaining < 0 ? .red : .primary, large: true)
@@ -43,24 +47,28 @@ struct ShowClockBar: View {
 
             Spacer()
 
-            Button(action: { showClock.toggle() }) {
-                Label(startButtonTitle, systemImage: showClock.isRunning ? "pause.fill" : "play.fill")
-            }
-            .keyboardShortcut("t", modifiers: .command)
-            .help(showClock.isRunning ? "Pause the show clock (⌘T)" : "Start the show clock (⌘T)")
+            // Running to an end time, the wall clock does the counting;
+            // there is nothing to start or reset.
+            if status.mode == .length {
+                Button(action: { showClock.toggle() }) {
+                    Label(startButtonTitle, systemImage: showClock.isRunning ? "pause.fill" : "play.fill")
+                }
+                .keyboardShortcut("t", modifiers: .command)
+                .help(showClock.isRunning ? "Pause the show clock (⌘T)" : "Start the show clock (⌘T)")
 
-            Button(action: { showClock.reset() }) {
-                Label("Reset", systemImage: "arrow.counterclockwise")
+                Button(action: { showClock.reset() }) {
+                    Label("Reset", systemImage: "arrow.counterclockwise")
+                }
+                .disabled(!showClock.hasStarted)
+                .help("Back to the full show length (⇧⌘T)")
             }
-            .disabled(!showClock.hasStarted)
-            .help("Back to the full show length (⇧⌘T)")
         }
         .buttonStyle(.bordered)
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .onReceive(ticker) { now = $0 }
-        .onAppear { syncLengthText() }
-        .onChange(of: store.showLengthSeconds) { _ in if !editingLength { syncLengthText() } }
+        .onAppear { syncSlotText() }
+        .onChange(of: store.clockSettings) { _ in if !editingSlot { syncSlotText() } }
     }
 
     private var startButtonTitle: String {
@@ -68,37 +76,88 @@ struct ShowClockBar: View {
         return showClock.hasStarted ? "Resume" : "Start"
     }
 
-    // MARK: - Show length
+    // MARK: - The slot
 
-    private var showLengthField: some View {
+    private var isEndTimeMode: Bool { store.clockSettings.mode == .endTime }
+
+    /// Mode switch plus the field for the length or the end time.
+    private var slotField: some View {
         VStack(alignment: .leading, spacing: 1) {
-            caption("Show length")
-            TextField("30:00", text: $lengthText, onEditingChanged: { began in
-                editingLength = began
-                if !began { commitLength() }
-            })
-            .textFieldStyle(.roundedBorder)
-            .font(.system(.body, design: .monospaced))
-            .frame(width: 72)
-            .onSubmit {
-                commitLength()
-                // Hand the keyboard back to the playlist so the spacebar
-                // plays the next song instead of typing into this field.
-                NSApp.keyWindow?.makeFirstResponder(nil)
+            caption(isEndTimeMode ? "Set ends at" : "Show length")
+            HStack(spacing: 6) {
+                Picker("", selection: modeBinding) {
+                    Image(systemName: "timer").tag(ShowClock.Mode.length)
+                        .help("Count a show length down from Start")
+                    Image(systemName: "clock").tag(ShowClock.Mode.endTime)
+                        .help("Count down to the time the set has to end")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 64)
+                .help("Give the slot as a length, or as the time it ends")
+
+                TextField(isEndTimeMode ? "7:15 PM" : "30:00", text: $slotText, onEditingChanged: { began in
+                    editingSlot = began
+                    if !began { commitSlot() }
+                })
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+                .frame(width: isEndTimeMode ? 84 : 72)
+                .onSubmit {
+                    commitSlot()
+                    // Hand the keyboard back to the playlist so the spacebar
+                    // plays the next song instead of typing into this field.
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                }
+                .help(isEndTimeMode
+                      ? "Time of day the set has to be over by: 7:15pm, 7:15 or 19:15"
+                      : "Total time the show is allowed to run: minutes, mm:ss or h:mm:ss")
             }
-            .help("Total time the show is allowed to run: minutes, mm:ss or h:mm:ss")
         }
     }
 
-    private func syncLengthText() {
-        lengthText = ShowClock.format(store.showLengthSeconds)
+    /// Switching to end time for the first time starts from the time the
+    /// show would end if it began now, rounded up to five minutes, so the
+    /// field never sits empty.
+    private var modeBinding: Binding<ShowClock.Mode> {
+        Binding(
+            get: { store.clockSettings.mode },
+            set: { mode in
+                var settings = store.clockSettings
+                settings.mode = mode
+                if mode == .endTime, settings.endTime == nil {
+                    let end = ShowClock.secondsAfterMidnight(of: now) + settings.length
+                    settings.endTime = (end / 300).rounded(.up) * 300
+                }
+                store.clockSettings = settings
+            }
+        )
     }
 
-    private func commitLength() {
-        if let seconds = ShowClock.parseLength(lengthText), seconds != store.showLengthSeconds {
-            store.showLengthSeconds = seconds
+    private func syncSlotText() {
+        let settings = store.clockSettings
+        if settings.mode == .endTime, let end = settings.endTime {
+            slotText = ShowClock.formatTimeOfDay(end, now: now)
+        } else {
+            slotText = ShowClock.format(settings.length)
         }
-        syncLengthText()
+    }
+
+    private func commitSlot() {
+        var settings = store.clockSettings
+        if settings.mode == .endTime {
+            if let seconds = ShowClock.parseTimeOfDay(slotText, now: now) { settings.endTime = seconds }
+        } else if let seconds = ShowClock.parseLength(slotText) {
+            settings.length = seconds
+        }
+        if settings != store.clockSettings { store.clockSettings = settings }
+        syncSlotText()
+    }
+
+    private func timeOfDay(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .medium
+        return formatter.string(from: date)
     }
 
     // MARK: - Readouts

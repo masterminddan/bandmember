@@ -306,4 +306,19 @@ struct PlaylistDocument: Codable {
     /// How long the show is allowed to run, for the show clock. Absent in
     /// playlists saved before the clock existed.
     var showLengthSeconds: Double? = nil
+    /// Whether the clock counts the length down or runs to an end time.
+    var showClockMode: ShowClock.Mode? = nil
+    /// The end time as seconds after local midnight.
+    var showEndTimeSeconds: Double? = nil
+
+    /// The clock settings the file holds. A file that says end time but
+    /// has none set (hand-edited, or from a build that lost it) falls
+    /// back to the length.
+    var clockSettings: ShowClock.Settings {
+        var settings = ShowClock.Settings()
+        settings.length = showLengthSeconds ?? ShowClock.defaultShowLength
+        settings.endTime = showEndTimeSeconds
+        settings.mode = (showClockMode == .endTime && showEndTimeSeconds != nil) ? .endTime : .length
+        return settings
+    }
 }

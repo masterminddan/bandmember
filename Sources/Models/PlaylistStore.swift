@@ -21,10 +21,11 @@ class PlaylistStore: ObservableObject {
     @Published var currentFilePath: URL? = nil
     private var savedSnapshot: [PlaylistItem] = []
 
-    /// How long the show may run, for the show clock. Saved with the
-    /// playlist, since it belongs to the booking rather than the machine.
-    @Published var showLengthSeconds: Double = ShowClock.defaultShowLength
-    private var savedShowLength: Double = ShowClock.defaultShowLength
+    /// What the show clock is set to: how long the show may run, or when
+    /// it has to be over. Saved with the playlist, since it belongs to the
+    /// booking rather than the machine.
+    @Published var clockSettings = ShowClock.Settings()
+    private var savedClockSettings = ShowClock.Settings()
 
     /// Mirrors `selectedIDs` to `UserDefaults` on every change so the
     /// selection survives across launches. Restored by `restoreLastSession`
@@ -95,7 +96,7 @@ class PlaylistStore: ObservableObject {
     // MARK: - Computed
 
     var hasUnsavedChanges: Bool {
-        items != savedSnapshot || showLengthSeconds != savedShowLength
+        items != savedSnapshot || clockSettings != savedClockSettings
     }
 
     var firstSelectedItem: PlaylistItem? {
@@ -681,8 +682,8 @@ class PlaylistStore: ObservableObject {
         pushUndo()
         items = []
         savedSnapshot = []
-        showLengthSeconds = ShowClock.defaultShowLength
-        savedShowLength = showLengthSeconds
+        clockSettings = ShowClock.Settings()
+        savedClockSettings = clockSettings
         selectedIDs = []
         playingItemIDs = []
         currentFilePath = nil
@@ -701,14 +702,15 @@ class PlaylistStore: ObservableObject {
                 item.relativePath = PlaylistPaths.relativePath(from: folder, to: item.filePath)
             }
             return item
-        }, showLengthSeconds: showLengthSeconds)
+        }, showLengthSeconds: clockSettings.length,
+           showClockMode: clockSettings.mode, showEndTimeSeconds: clockSettings.endTime)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(doc)
         try data.write(to: url)
         currentFilePath = url
         savedSnapshot = items
-        savedShowLength = showLengthSeconds
+        savedClockSettings = clockSettings
         UserDefaults.standard.set(url.path, forKey: kLastPlaylistPath)
     }
 
@@ -731,8 +733,8 @@ class PlaylistStore: ObservableObject {
             }
         }
         savedSnapshot = items
-        showLengthSeconds = doc.showLengthSeconds ?? ShowClock.defaultShowLength
-        savedShowLength = showLengthSeconds
+        clockSettings = doc.clockSettings
+        savedClockSettings = clockSettings
         selectedIDs = []
         playingItemIDs = []
         currentFilePath = url

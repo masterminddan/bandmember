@@ -117,12 +117,14 @@ struct BandMemberApp: App {
 
                 // ⌘T is on the bar's own button, so the menu item would
                 // double up the shortcut; it is listed here without one.
+                // Neither applies when the clock runs to an end time.
                 Button(showClock.isRunning ? "Pause Show Clock" : "Start Show Clock") {
                     showClock.toggle()
                 }
+                .disabled(store.clockSettings.mode == .endTime)
                 Button("Reset Show Clock") { showClock.reset() }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
-                    .disabled(!showClock.hasStarted)
+                    .disabled(!showClock.hasStarted || store.clockSettings.mode == .endTime)
             }
 
             CommandMenu("Audio") {
