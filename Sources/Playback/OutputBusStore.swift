@@ -12,9 +12,12 @@ import Combine
 /// - **Device mappings** stay in Application Support on each machine. They
 ///   are keyed by CoreAudio device UID, which embeds hardware serial
 ///   numbers and Bluetooth addresses, so they must never be written into
-///   the (public) repo. The local file also keeps a copy of the buses and
-///   is the sole store when the checkout isn't present (e.g. the .app was
-///   copied to a machine without the source).
+///   the (public) repo. The local file also keeps a copy of the buses.
+/// - A **copy of the bus file is packed into the .app** by `build.sh`. On
+///   a machine without the checkout (the .app was copied over on its own)
+///   it stands in for the git-tracked file, read-only: the buses it names
+///   are adopted so that machine resolves playlist bus IDs like the one
+///   the app was built on, and any buses added locally are kept alongside.
 ///
 /// One bus is designated "default" (`mainBusID`) — it's guaranteed to
 /// exist and acts as the fallback when a cue's bus is missing or unmapped
@@ -46,6 +49,13 @@ final class OutputBusStore: ObservableObject {
         .deletingLastPathComponent()   // Playback
         .deletingLastPathComponent()   // Sources
         .deletingLastPathComponent()   // repo root
+
+    /// The bus file as it was when the app was built, copied into the
+    /// bundle's Resources by `build.sh`. Nil for a binary run outside a
+    /// bundle, or built some other way.
+    private static var bundledBusesURL: URL? {
+        Bundle.main.url(forResource: "output-buses", withExtension: "json")
+    }
 
     /// `~/Library/Application Support/BandMember/output-mappings.json`.
     private static func localConfigURL() -> URL {
@@ -88,6 +98,7 @@ final class OutputBusStore: ObservableObject {
 
         loadLocal()
         loadShared()
+        loadBundled()
         ensureDefaults()
 
         // One-time migration: a checkout with no bus file yet gets seeded
@@ -153,16 +164,45 @@ final class OutputBusStore: ObservableObject {
     /// bus IDs the same way.
     private func loadShared() {
         guard let url = sharedURL, let data = try? Data(contentsOf: url) else { return }
-        guard let cfg = try? JSONDecoder().decode(SharedBusConfig.self, from: data),
-              !cfg.buses.isEmpty else {
+        guard let cfg = Self.decodeShared(data) else {
             sharedFileUnreadable = true
             debugLog("OutputBusStore: could not decode \(url.path); keeping local buses and leaving that file untouched")
             return
         }
+        adopt(cfg, keepingLocalExtras: false)
+    }
+
+    /// With no checkout on this machine, takes the buses from the copy of
+    /// the bus file packed into the app. Buses this machine added on its
+    /// own aren't in that copy; they stay, after the packed ones, since
+    /// nothing else remembers them.
+    private func loadBundled() {
+        guard sharedURL == nil, let url = Self.bundledBusesURL,
+              let data = try? Data(contentsOf: url) else { return }
+        guard let cfg = Self.decodeShared(data) else {
+            debugLog("OutputBusStore: could not decode the bus file packed in the app; keeping local buses")
+            return
+        }
+        debugLog("OutputBusStore: buses from the copy packed in the app (\(cfg.buses.count))")
+        adopt(cfg, keepingLocalExtras: true)
+    }
+
+    private static func decodeShared(_ data: Data) -> SharedBusConfig? {
+        guard let cfg = try? JSONDecoder().decode(SharedBusConfig.self, from: data),
+              !cfg.buses.isEmpty else { return nil }
+        return cfg
+    }
+
+    /// Makes `cfg`'s buses the bus list, carrying this machine's device
+    /// mappings across to the new default bus where needed.
+    private func adopt(_ cfg: SharedBusConfig, keepingLocalExtras: Bool) {
         let localMainID = mainBusID
         let hadLocalMain = buses.contains { $0.id == localMainID }
 
-        self.buses = cfg.buses
+        let extras = keepingLocalExtras
+            ? buses.filter { local in !cfg.buses.contains { $0.id == local.id } }
+            : []
+        self.buses = cfg.buses + extras
         if let id = cfg.mainBusID, cfg.buses.contains(where: { $0.id == id }) {
             self.mainBusID = id
         } else {

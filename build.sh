@@ -27,6 +27,12 @@ if [ -f "AppIcon.icns" ]; then
     cp "AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
 fi
 
+# Pack the shared bus list so a copy of the .app on a machine without this
+# checkout still resolves the bus IDs that playlists refer to.
+if [ -f "config/output-buses.json" ]; then
+    cp "config/output-buses.json" "${RESOURCES_DIR}/output-buses.json"
+fi
+
 # Create Info.plist
 cat > "${CONTENTS_DIR}/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
